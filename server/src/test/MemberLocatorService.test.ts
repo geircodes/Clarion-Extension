@@ -169,12 +169,14 @@ suite('MemberLocatorService', () => {
             assert.strictEqual(result!.isClass, true);
         });
 
-        test('bare CLASS keyword → null (no named type arg)', async () => {
+        test('bare CLASS keyword (no named type arg) → self as navigable type, same as bare QUEUE/GROUP/FILE', async () => {
             const doc = makeDoc('rv5.clw', 'LocalCls  CLASS\n  Foo PROCEDURE()\nEND\n');
             const tokens = tokenCache.getTokens(doc);
             const result = await service.resolveVariableType('LocalCls', tokens, doc);
 
-            assert.strictEqual(result, null, 'Bare CLASS should return null');
+            assert.ok(result, 'Bare CLASS should resolve to its own label, mirroring bare QUEUE/GROUP/FILE');
+            assert.strictEqual(result!.typeName, 'LocalCls');
+            assert.strictEqual(result!.isClass, true);
         });
 
         test('PROCEDURE type → null (not a class member target)', async () => {
@@ -478,6 +480,24 @@ suite('MemberLocatorService', () => {
             const result = await service.resolveDotAccess('myWidget', 'Width', doc);
 
             assert.ok(result, 'Should resolve myWidget.Width when declared as CLASS(WidgetClass)');
+            assert.ok(result!.type.toUpperCase().includes('LONG'));
+        });
+
+        test('resolves bare local CLASS self-instance (no ,TYPE, no separate instance var) → member', async () => {
+            // `Label CLASS ... END` with no ,TYPE and no separate `obj Label` declaration:
+            // the label doubles as both the class and its single instance, same shape as a
+            // bare `Label QUEUE/GROUP/FILE ... END` local — this is resolveDotAccess, the
+            // documented entry point for hover/F12/Ctrl+F12, so this pins that all three
+            // now see this receiver shape, not just resolveVariableType in isolation.
+            const docContent = [
+                'MyOwn:CLASS CLASS',
+                'My:My:Method  PROCEDURE(), LONG',
+                '            END',
+            ].join('\n');
+            const doc = makeDoc('da_bareclass.clw', docContent);
+            const result = await service.resolveDotAccess('MyOwn:CLASS', 'My:My:Method', doc);
+
+            assert.ok(result, 'Should resolve MyOwn:CLASS.My:My:Method on a bare self-instance CLASS');
             assert.ok(result!.type.toUpperCase().includes('LONG'));
         });
 
