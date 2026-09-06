@@ -1801,9 +1801,11 @@ export class MemberLocatorService {
         const isReference = idx + 1 < lineTokens.length && lineTokens[idx + 1].type === TokenType.ReferenceVariable;
 
         if (!typeStr || typeStr === 'UNKNOWN') {
+            // Bare local structure declaration, no `(TypeName)` argument: `Label CLASS ... END`,
+            // same shape as `Label QUEUE/GROUP/FILE ... END`. The label doubles as both the type
+            // and the single instance — use it as the navigable type name for all four alike.
             if (token.type === TokenType.Structure && token.label) {
                 const structureKeyword = token.value.toUpperCase();
-                if (structureKeyword === 'CLASS') return null;
                 return {
                     typeName: token.label,
                     isClass: structureKeyword === 'CLASS',
@@ -1814,12 +1816,12 @@ export class MemberLocatorService {
                 const structureToken = lineTokens.find(t =>
                     t.type === TokenType.Structure &&
                     t.start > token.start &&
-                    ['QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
+                    ['CLASS', 'QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
                 );
                 if (structureToken) {
                     return {
                         typeName: token.value,
-                        isClass: false,
+                        isClass: structureToken.value.toUpperCase() === 'CLASS',
                         isReference
                     };
                 }
@@ -1846,7 +1848,6 @@ export class MemberLocatorService {
             // Use its own label as navigable structure name for chained lookups.
             if (token.type === TokenType.Structure && token.label) {
                 const structureKeyword = typeStr.toUpperCase();
-                if (structureKeyword === 'CLASS') return null;
                 return {
                     typeName: token.label,
                     isClass: structureKeyword === 'CLASS',
@@ -1857,7 +1858,7 @@ export class MemberLocatorService {
                 const structureToken = lineTokens.find(t =>
                     t.type === TokenType.Structure &&
                     t.start > token.start &&
-                    ['QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
+                    ['CLASS', 'QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
                 );
                 if (structureToken) {
                     const structureKeyword = structureToken.value.toUpperCase();
