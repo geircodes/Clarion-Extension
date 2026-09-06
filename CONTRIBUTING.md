@@ -11,7 +11,7 @@ This project uses a simple release-branch model:
 | `master` | Stable released code — only updated at release time |
 | `version-X.X.X` | Active development for the next release |
 
-**Always branch from and target the current development branch** (e.g. `version-1.0.2`), not `master`. The current development branch is the **highest-numbered `version-x.y.z` branch** in the [branch list](https://github.com/msarson/Clarion-Extension/branches) — normally also the repository's default branch, but check the branch list rather than relying on that.
+**Always branch from and target the current development branch** (e.g. `version-1.0.3`), not `master`. The current development branch is the **highest-numbered `version-x.y.z` branch** in the [branch list](https://github.com/msarson/Clarion-Extension/branches) — normally also the repository's default branch, but check the branch list rather than relying on that.
 
 If you open a PR against `master` by mistake, don't close it — change the base in the **`base:`** dropdown at the top of the PR, or just say so and a maintainer will retarget it for you. Nothing is lost either way.
 
@@ -22,7 +22,7 @@ Note that a PR opened against `master` will show a diff containing every commit 
 ```bash
 git clone https://github.com/msarson/Clarion-Extension.git
 cd Clarion-Extension
-git checkout version-1.0.2   # or the current development branch (see above)
+git checkout version-x.y.z   # the current development branch — see "Branching Model" above
 npm install
 npm run compile
 ```
