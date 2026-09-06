@@ -180,18 +180,24 @@ The ANTLR4 grammar / folding-provider exploration (2025–Jan 2026) was split ou
 
 ## 🆕 What's New
 
-### Latest: v1.0.1 — Maintenance: performance follow-ups & correctness fixes
+### Latest: v1.0.2 (2026-09-06) — Solutions that load wrong now say so, and a batch of navigation fixes
 
-1.0.1 is a stability release on top of the 1.0 overhaul — more startup and hover performance work verified on the real 40-project / 3,000-file solution, plus a batch of hover, completion, and diagnostic correctness fixes (many contributed by [@geircodes](https://github.com/geircodes)).
+1.0.2 is a correctness release. The theme running through it is **silent failure**: several ways a solution could load in a degraded state — wrong build configuration, unresolvable redirection paths, source files missing from the index — looked identical to a healthy load, so features simply returned nothing and the extension read as broken rather than misconfigured. Those now report themselves. Alongside that is a run of hover, navigation and diagnostic fixes, many contributed by [@geircodes](https://github.com/geircodes).
 
-- **Performance follow-ups:** startup validators no longer freeze the editor in multi-second blocks; F12 on a built-in returns instantly instead of a ~24s cold walk; the cross-file prewarm, reachable-include set, discarded-return-value memos, and MEMBER-parent docs all persist or cache so warm starts and repeat hovers stay cheap.
-- **Diagnostics:** `.app` global data is no longer falsely flagged "not declared" in generated MEMBER modules; a structure keyword used as a plain label no longer triggers a false "not terminated"; `PRAGMA(...)` is no longer mistyped as a procedure and corrupting completion scope.
-- **Completion & hover:** member completion keeps working once you type past the dot; `?Ctrl` field equates scope to the current procedure; hover footers render `file:line` locations as clickable links; several hover misclassifications (control-vs-variable, colon-prefixed dotted access, `GROUP/QUEUE/RECORD(Type)`) fixed.
-- **Highlighting:** custom prefix colours no longer bleed through commented-out lines.
+- **Degraded solutions are visible:** source files that fail to resolve are counted and named instead of being silently dropped from the file-relationship graph; redirection macros that expand to nothing say so rather than leaving a dead search path; re-opening a solution from the recent list now validates the stored build configuration instead of adopting a stale one.
+- **Redirection:** `%THISDIR%`, `%WinUserApplicationData%` and `%WinCommonApplicationData%` are implemented — previously they were left in the path as literal text, so every directory on that line failed to resolve.
+- **Command Palette:** every command now carries a `Clarion` category, so typing "clarion" finds them — including how to open a solution, which was previously reachable only from the Clarion Tools sidebar.
+- **Navigation & hover:** a bare local `CLASS` used as its own instance now resolves for hover, F12, Ctrl+F12, completion and signature help; colon-bearing labels no longer truncate and kill navigation; a local CLASS's indented `END` no longer swallows the next procedure; GROUP/QUEUE/CLASS field declarations resolve to themselves; 61 built-ins that hovered as "undefined" now show their signatures.
+- **Diagnostics:** attribute and built-in names that collide with your own variables no longer hijack the hover card or the warning; discarded-return warnings survive a trailing comment; false "missing END" on a WINDOW with a continuation-line attribute is fixed.
+- **Performance:** hovering an undeclared bare word in a large generated module no longer freezes for ~10s (10.5s → 13ms on the 40-project test solution), and Clarion's predefined compiler flags (`DLL_MODE`, `_DEBUG_`, `_USTRING_`, …) now hover properly instead of being flagged as undeclared.
 
 **[See the full changelog for the complete list →](CHANGELOG.md)**
 
 ---
+
+### Recent: v1.0.1 (2026-08-09) — Maintenance: performance follow-ups & correctness fixes
+
+A stability release on top of the 1.0 overhaul — more startup and hover performance work verified on the real 40-project / 3,000-file solution, plus a batch of hover, completion, and diagnostic correctness fixes. Startup validators stopped freezing the editor in multi-second blocks, F12 on a built-in became instant instead of a ~24s cold walk, and `.app` global data stopped being falsely flagged "not declared" in generated MEMBER modules.
 
 ### Recent: v1.0.0 (2026-07-11) — Performance at scale, exact references, refactoring
 

@@ -2378,17 +2378,50 @@ connection.onNotification('clarion/updatePaths', async (params: {
                 const graph = FileRelationshipGraph.getInstance();
                 const solutionManager = SolutionManager.getInstance();
                 const allFiles: string[] = [];
+                // #434 — a source file whose path cannot be resolved used to be
+                // dropped here with no counter and no log, so a resolution
+                // failure was indistinguishable from a healthy build: the graph
+                // built over a short (or empty) list and still reported
+                // `status: 'built'`. Track the misses so the outcome can say how
+                // complete it actually is.
+                const unresolved: string[] = [];
                 if (solutionManager?.solution) {
                     for (const project of solutionManager.solution.projects) {
                         for (const sourceFile of project.sourceFiles) {
                             const absPath = sourceFile.getAbsolutePath();
-                            if (absPath) allFiles.push(absPath);
+                            if (absPath) {
+                                allFiles.push(absPath);
+                            } else {
+                                unresolved.push(`${project.name}/${sourceFile.relativePath || sourceFile.name}`);
+                            }
                         }
                     }
                 }
+                const sourceFileCount = allFiles.length + unresolved.length;
+                if (unresolved.length > 0) {
+                    // Logged at `error` deliberately: this logger is pinned to
+                    // "error", so a `warn` would be as silent as the bug. Partial
+                    // loss matters as much as total — generated sources dropping
+                    // out of some projects leaves a plausible-looking non-zero
+                    // fileCount that is quietly wrong.
+                    const sample = unresolved.slice(0, 10).join(', ');
+                    logger.error(
+                        `❌ [#434] ${unresolved.length} of ${sourceFileCount} source file(s) could not be resolved ` +
+                        `to a path on disk and are MISSING from the file relationship graph. Features that depend ` +
+                        `on it (class-method hover, references, signature help, implementations, document links) ` +
+                        `will silently return nothing for them. This usually means the build configuration or ` +
+                        `redirection paths are wrong for this solution. First ${Math.min(10, unresolved.length)}: ` +
+                        `${sample}${unresolved.length > 10 ? ', …' : ''}`
+                    );
+                }
                 const frgStart = Date.now();
                 logger.info(`⏱️ [STARTUP] FRG build starting for ${allFiles.length} source file(s) at +${frgStart - globalStartTime}ms`);
-                connection.sendNotification('clarion/graphStatus', { status: 'building', fileCount: allFiles.length });
+                connection.sendNotification('clarion/graphStatus', {
+                    status: 'building',
+                    fileCount: allFiles.length,
+                    sourceFileCount,
+                    unresolvedCount: unresolved.length
+                });
                 await graph.buildInBackground(allFiles).catch(err =>
                     logger.error(`❌ [FRG] Background build failed: ${err}`)
                 );
@@ -2404,13 +2437,19 @@ connection.onNotification('clarion/updatePaths', async (params: {
                     member_edges: graph.lastBuildStats?.memberEdges ?? -1,
                     include_edges: graph.lastBuildStats?.includeEdges ?? -1,
                     module_edges: graph.lastBuildStats?.moduleEdges ?? -1,
+                    // #434 — file_count above counts what RESOLVED, so on its own
+                    // it cannot distinguish 0-of-0 from 0-of-3016.
+                    source_file_count: sourceFileCount,
+                    unresolved_count: unresolved.length,
                     since_module_load_ms: Date.now() - serverModuleLoadedAt
                 });
                 connection.sendNotification('clarion/graphStatus', {
                     status: 'built',
                     fileCount: graph.fileCount,
                     edgeCount: graph.edgeCount,
-                    durationMs: graph.buildDurationMs
+                    durationMs: graph.buildDurationMs,
+                    sourceFileCount,
+                    unresolvedCount: unresolved.length
                 });
             };
 

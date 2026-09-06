@@ -214,17 +214,39 @@ export class ClarionTokenizer {
                 const relevantTypes = PatternMatcher.getPatternsByCharClass().get(charClass) || types;
 
                 // ✅ Check if current position is inside parentheses (...) or optional parameters <...>
-                // Structure keywords inside these contexts are parameter types, not structure declarations
+                // Structure keywords inside these contexts are parameter types, not structure declarations.
+                //
+                // #415: robust to two things the naive per-line counter got wrong:
+                //   (a) parens/brackets INSIDE string literals (e.g. a LIST's FORMAT('48R(2)...')
+                //       picture string) — skip quoted text ('' escapes a quote); and
+                //   (b) a group opened on a PREVIOUS continuation line. A leading unmatched ')'/'>'
+                //       (the running depth dipping below 0) means the group was opened earlier in the
+                //       logical (continued) line, so the effective depth is offset by that minimum.
+                //       Without this, a multi-line FORMAT(...) closing with `...'),FROM(QUEUE)` read
+                //       QUEUE as top-level and misclassified it as an (unterminated) structure opener.
                 const isInsideParamsOrTemplate = (pos: number): boolean => {
-                    let openParens = 0;
-                    let openBrackets = 0;
+                    let parenRun = 0, parenMin = 0;
+                    let brkRun = 0, brkMin = 0;
+                    let inString = false;
                     for (let i = 0; i < pos; i++) {
-                        if (line[i] === '(') openParens++;
-                        else if (line[i] === ')') openParens--;
-                        else if (line[i] === '<') openBrackets++;
-                        else if (line[i] === '>') openBrackets--;
+                        const ch = line[i];
+                        if (inString) {
+                            if (ch === "'") {
+                                if (line[i + 1] === "'") { i++; continue; } // escaped '' stays in string
+                                inString = false;
+                            }
+                            continue;
+                        }
+                        if (ch === "'") { inString = true; continue; }
+                        if (ch === '!') break; // rest of the line is a comment
+                        if (ch === '(') parenRun++;
+                        else if (ch === ')') { parenRun--; if (parenRun < parenMin) parenMin = parenRun; }
+                        else if (ch === '<') brkRun++;
+                        else if (ch === '>') { brkRun--; if (brkRun < brkMin) brkMin = brkRun; }
                     }
-                    return openParens > 0 || openBrackets > 0;
+                    const parenDepth = parenRun - Math.min(0, parenMin);
+                    const brkDepth = brkRun - Math.min(0, brkMin);
+                    return parenDepth > 0 || brkDepth > 0;
                 };
 
                 // Test only patterns relevant to this character class
@@ -358,7 +380,28 @@ export class ClarionTokenizer {
                                 // Check if inside parentheses or optional parameters
                                 if (isInsideParamsOrTemplate(position)) {
                                     if (TOKENIZER_TRACE) logger.debug(`⏭️ Skipping structure keyword '${structName}' (${match[0]}) at position ${position} - inside parameters or optional params`);
-                                    continue; // Try next structure pattern
+                                    // #416: this is a structure keyword used as an attribute argument /
+                                    // parameter type (e.g. FROM(QUEUE), PROCEDURE(FILE,KEY)), NOT a
+                                    // structure opener. Emit it as a KEYWORD reference token and advance —
+                                    // otherwise it falls through to the Variable pattern, which EXCLUDES
+                                    // structure keywords, and the leading character is dropped
+                                    // (QUEUE -> "UEUE"). Keyword (not Variable) is deliberate: the
+                                    // document-symbol/structure builders ignore keywords, so a keyword-named
+                                    // parameter type does not become a spurious outline declaration.
+                                    const refValue = match[0].trimStart();
+                                    const refLead = match[0].length - refValue.length;
+                                    this.tokens.push({
+                                        type: TokenType.Keyword,
+                                        value: refValue,
+                                        line: lineNumber,
+                                        start: position + refLead,
+                                        maxLabelLength: 0
+                                    });
+                                    position += match[0].length;
+                                    column += match[0].length;
+                                    matched = true;
+                                    tokensOnCurrentLine++;
+                                    break; // stop testing other structure patterns
                                 }
                                 
                                 if (TOKENIZER_TRACE) patternMatches.set(tokenType, (patternMatches.get(tokenType) || 0) + 1);

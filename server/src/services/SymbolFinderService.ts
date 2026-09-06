@@ -29,6 +29,7 @@ import { ReferenceCountIndex } from './ReferenceCountIndex';
 import { pathToCanonicalUri } from '../utils/UriUtils';
 import { resolveViaProjectRedirection as resolveViaProjectRedirection328 } from '../utils/RedirectionResolution';
 import { BuiltinFunctionService } from '../utils/BuiltinFunctionService'; // #374
+import { CompilerFlagService } from '../utils/CompilerFlagService'; // #420
 import LoggerManager from '../logger';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -118,12 +119,20 @@ export interface SymbolInfo {
     
     /** Full declaration if available (e.g., "Counter LONG,AUTO") */
     declaration?: string;
-    
+
     /** Original search word (before any prefix stripping) */
     originalWord: string;
-    
+
     /** Search word used to find this symbol (may be stripped) */
     searchWord: string;
+
+    /**
+     * Set when this symbol is a field directly inside a GROUP/QUEUE/FILE/RECORD/
+     * VIEW/REPORT (see TokenHelper.getEnclosingDataStructure) — lets the hover
+     * formatter note "field of GROUP `Filter`" instead of showing a bare local
+     * variable card indistinguishable from a genuinely standalone variable.
+     */
+    parentStructure?: { label: string; type: string };
 }
 
 /**
@@ -333,21 +342,71 @@ export class SymbolFinderService {
         tokens: Token[],
         scopeToken: Token,
         document: TextDocument,
-        originalWord?: string
+        originalWord?: string,
+        hoverLine?: number
     ): SymbolInfo | null {
         logger.info(`Finding local variable: "${word}" in scope: ${scopeToken.value} at line ${scopeToken.line}`);
-        
+
+        const searchText = originalWord || word;
+
+        // Fast path: the cursor is literally ON a declaration token for this name
+        // (column 0, Label/Variable, this exact line) — that IS the answer, with
+        // no ambiguity left to resolve. Without this, two things go wrong for a
+        // field of a PRE()-less GROUP/QUEUE:
+        //   1. The name-based symbol-tree search below has no line awareness, so
+        //      a DIFFERENT same-named symbol elsewhere (e.g. a top-level `Name`
+        //      variable) wins over the GROUP field the cursor is actually on.
+        //   2. Even when the token-fallback further down IS reached, the #350
+        //      "PRE-less fields are dot-only" rule — correct for a bare
+        //      REFERENCE elsewhere in code — wrongly excludes the DECLARATION
+        //      token itself; you were never doing a bare-name lookup, you're
+        //      already looking straight at it.
+        // Real repro: `Filter GROUP` with sibling fields `Name`/`Type`/`Flag` and
+        // no PRE() — hovering the GROUP's own `Name` field showed the unrelated
+        // top-level `Name` variable's declaration instead, and `Type`/`Flag`
+        // (no name collision to mask the miss) got no hover at all.
+        if (hoverLine !== undefined) {
+            const wordLower = searchText.toLowerCase();
+            const declToken = tokens.find(t =>
+                t.line === hoverLine &&
+                t.start === 0 &&
+                (t.type === TokenType.Label || t.type === TokenType.Variable) &&
+                t.value.toLowerCase() === wordLower);
+            // Same exclusion the token-fallback further down applies: a MAP/global
+            // procedure or method declaration sharing this line is handled by
+            // findProcedureDeclaration with the correct scope/type, not here.
+            const isProcDecl = declToken !== undefined && tokens.some(t =>
+                t.line === declToken.line &&
+                (t.type === TokenType.Procedure || t.type === TokenType.Function) &&
+                (t.subType === TokenType.MapProcedure ||
+                 t.subType === TokenType.GlobalProcedure ||
+                 t.subType === TokenType.MethodDeclaration));
+            if (declToken && !isProcDecl) {
+                logger.info(`✅ Found "${searchText}" via direct declaration-line match at line ${declToken.line}`);
+                return {
+                    token: declToken,
+                    type: SymbolFinderService.extractTypeInfo(declToken, tokens),
+                    scope: { token: scopeToken, type: 'local' },
+                    location: { uri: document.uri, line: declToken.line, character: declToken.start },
+                    originalWord: originalWord || word,
+                    searchWord: word,
+                    // Pass the structure so a CLASS property (never `.parent`-linked, see
+                    // getEnclosingDataStructure) still gets its "field of CLASS `X`" note.
+                    parentStructure: TokenHelper.getEnclosingDataStructure(declToken, this.tokenCache.getStructure(document))
+                };
+            }
+        }
+
         // Get the symbol tree (pass document for better results)
         const symbols = this.symbolProvider.provideDocumentSymbols(tokens, document.uri, document);
-        
+
         // Find the procedure/method symbol containing this scope
         const procedureSymbol = this.findProcedureContainingLine(symbols, scopeToken.line);
         if (!procedureSymbol) {
             logger.info(`❌ No procedure symbol found for scope at line ${scopeToken.line} — falling back to token scan`);
         }
-        
+
         // Search for the variable in the symbol tree (if we have a procedure symbol)
-        const searchText = originalWord || word;
         // #265: a bare search word must never bind to a field of a PRE()'d
         // structure — those are only addressable as Pre:Field or Structure.Field
         // (Language Reference, PRE attribute). Qualified searches resolve via
@@ -920,6 +979,66 @@ export class SymbolFinderService {
     }
     
     /**
+     * Resolves the MEMBER token for a file, following its FIRST statement into an
+     * INCLUDE'd shim when no literal MEMBER statement is present locally — mirrors
+     * MemberLocatorService.resolveMemberHeaderToken (same project convention: MEMBER('program')
+     * often lives in a small generated shim reached via INCLUDE('member.clw') rather than being
+     * written directly in each member module, so a shared source tree can belong to different
+     * PROGRAMs across projects by swapping just that shim). TokenHelper.findMemberHeaderToken()
+     * only sees literal tokens in the tokens it's given, so it can never find a MEMBER hidden
+     * behind that indirection on its own.
+     *
+     * Because MEMBER/PROGRAM must be the first statement of the compiled token stream (see
+     * TokenHelper.findShimIncludeToken), only the FIRST statement of each file is consulted:
+     * a non-INCLUDE first statement is an instant miss with zero file reads, each hop reads
+     * exactly one file, MAX_SHIM_HOPS bounds the rare chained-shim case, and a visited set
+     * stops include cycles.
+     *
+     * The shim include is resolved redirection-first (`resolveViaProjectRedirection`, threaded
+     * with `fromFile` for #328 owner-project-first) with a plain relative-path probe as the
+     * fallback — the same order MemberLocatorService.resolveFilePath uses — so a shim reachable
+     * only via a .red mapping resolves identically for hover (MemberLocatorService) and for the
+     * definition/global-variable paths that come through here.
+     */
+    private static readonly MAX_SHIM_HOPS = 3;
+    private async resolveMemberHeaderToken(tokens: Token[], currentDir: string, fromFile?: string): Promise<Token | undefined> {
+        const visited = new Set<string>();
+        for (let hop = 0; hop <= SymbolFinderService.MAX_SHIM_HOPS; hop++) {
+            const direct = TokenHelper.findMemberHeaderToken(tokens);
+            if (direct) return direct;
+
+            const shimInclude = TokenHelper.findShimIncludeToken(tokens);
+            if (!shimInclude) return undefined;
+            const viaRedirection = resolveViaProjectRedirection328(shimInclude.referencedFile!, fromFile ?? null);
+            const relative = path.resolve(currentDir, shimInclude.referencedFile!);
+            const resolvedPath = viaRedirection ?? (fs.existsSync(relative) ? relative : null);
+            if (!resolvedPath) return undefined;
+            const key = resolvedPath.toLowerCase();
+            if (visited.has(key)) return undefined;
+            visited.add(key);
+
+            const incUri = pathToCanonicalUri(resolvedPath);
+            let incTokens = this.tokenCache.getTokensByUriCaseInsensitive(incUri);
+            if (!incTokens) {
+                try {
+                    const content = await fs.promises.readFile(resolvedPath, 'utf-8');
+                    const incDoc = TextDocument.create(incUri, 'clarion', 1, content);
+                    incTokens = this.tokenCache.getTokens(incDoc);
+                } catch { return undefined; }
+            }
+            tokens = incTokens;
+            currentDir = path.dirname(resolvedPath);
+            fromFile = resolvedPath;
+        }
+        return undefined;
+    }
+
+    /** See TokenHelper.normalizeMemberFilename — kept as a thin delegate for existing call sites. */
+    private normalizeMemberFilename(name: string): string {
+        return TokenHelper.normalizeMemberFilename(name);
+    }
+
+    /**
      * Find a structure field or sub-structure accessed via PRE:Field notation.
      * e.g. "IBSDataSets:Record" → prefix="IBSDataSets", fieldName="Record"
      * Finds the structure with structurePrefix="IBSDataSets" and returns scope='field'
@@ -937,11 +1056,12 @@ export class SymbolFinderService {
         if (result) return result;
 
         // If MEMBER file, search the parent PROGRAM file
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const currentFilePath = decodeURIComponent(document.uri.replace(/^file:\/\/\//i, '').replace(/\//g, '\\'));
+        const memberToken = await this.resolveMemberHeaderToken(tokens, path.dirname(currentFilePath), currentFilePath);
         if (memberToken?.referencedFile) {
             try {
-                const currentFilePath = decodeURIComponent(document.uri.replace(/^file:\/\/\//i, '').replace(/\//g, '\\'));
-                let resolvedPath = path.resolve(path.dirname(currentFilePath), memberToken.referencedFile);
+                const memberFile = this.normalizeMemberFilename(memberToken.referencedFile);
+                let resolvedPath = path.resolve(path.dirname(currentFilePath), memberFile);
                 let parentUri = `file:///${resolvedPath.replace(/\\/g, '/')}`;
 
                 // #119 — cache-first parity with findGlobalVariableInParentFile (:816-838):
@@ -964,7 +1084,7 @@ export class SymbolFinderService {
                         // without it, prefixed fields of parent-inline FILEs dead-end here.
                         const solutionManager = SolutionManager.getInstance();
                         const viaRedirection = solutionManager
-                            ? await solutionManager.findFileWithExtension(memberToken.referencedFile, currentFilePath)
+                            ? await solutionManager.findFileWithExtension(memberFile, currentFilePath)
                             : null;
                         if (!viaRedirection?.path || !fs.existsSync(viaRedirection.path)) {
                             return null;
@@ -1133,11 +1253,14 @@ export class SymbolFinderService {
         }
 
         // Step 2: If not found and current file has MEMBER token, search parent file
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const currentFilePathForMember = decodeURIComponent(document.uri.replace(/^file:\/\/\//i, '').replace(/\//g, '\\'));
+        const memberToken = await this.resolveMemberHeaderToken(tokens, path.dirname(currentFilePathForMember), currentFilePathForMember);
 
         if (memberToken && memberToken.referencedFile) {
             logger.info(`Found MEMBER reference to: ${memberToken.referencedFile}`);
-            const parentResult = await this.findGlobalVariableInParentFile(word, memberToken.referencedFile, document);
+            const parentResult = await this.findGlobalVariableInParentFile(
+                word, this.normalizeMemberFilename(memberToken.referencedFile), document
+            );
             if (parentResult) return parentResult;
             // Fall through to equates.clw check
         }
@@ -1680,6 +1803,12 @@ export class SymbolFinderService {
                 logger.info(`⏭️ [#374] "${word}" is a built-in — skipping cross-file tiers (no-scope)`);
                 return null;
             }
+            // #420: a predefined compiler flag (DLL_MODE, _DEBUG_, _C80_ …) has no source
+            // declaration anywhere — same reasoning, same bail point.
+            if (CompilerFlagService.getInstance().isCompilerFlag(word)) {
+                logger.info(`⏭️ [#420] "${word}" is a predefined compiler flag — skipping cross-file tiers (no-scope)`);
+                return null;
+            }
 
             // #319 (reopen): global BEFORE the sibling walk. Globals like
             // GlobalResponse occur in EVERY member module, so the index prune
@@ -1718,7 +1847,7 @@ export class SymbolFinderService {
         }
         
         // 2. Try as local variable
-        result = this.findLocalVariable(word, tokens, currentScope, document);
+        result = this.findLocalVariable(word, tokens, currentScope, document, undefined, position.line);
         if (result) {
             logger.info(`✅ Found as local variable: ${word}`);
             return result;
@@ -1757,6 +1886,12 @@ export class SymbolFinderService {
         // build").
         if (BuiltinFunctionService.getInstance().isBuiltin(word)) {
             logger.info(`⏭️ [#374] "${word}" is a built-in — skipping cross-file tiers`);
+            return null;
+        }
+        // #420: a predefined compiler flag (DLL_MODE, _DEBUG_, _C80_ …) has no source
+        // declaration anywhere — same reasoning, same bail point.
+        if (CompilerFlagService.getInstance().isCompilerFlag(word)) {
+            logger.info(`⏭️ [#420] "${word}" is a predefined compiler flag — skipping cross-file tiers`);
             return null;
         }
 
@@ -1812,7 +1947,7 @@ export class SymbolFinderService {
             }
             
             // Try local variable with stripped word
-            result = this.findLocalVariable(searchWord, tokens, currentScope, document, word);
+            result = this.findLocalVariable(searchWord, tokens, currentScope, document, word, position.line);
             if (result) {
                 logger.info(`✅ Found as local variable (stripped): ${searchWord}`);
                 return result;

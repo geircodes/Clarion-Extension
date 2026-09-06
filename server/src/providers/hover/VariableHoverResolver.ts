@@ -9,6 +9,7 @@ import { CrossFileCache } from './CrossFileCache';
 import { SymbolFinderService } from '../../services/SymbolFinderService';
 import { MemberLocatorService } from '../../services/MemberLocatorService';
 import { TokenHelper } from '../../utils/TokenHelper';
+import { CompilerFlagService } from '../../utils/CompilerFlagService'; // #420
 import { ProcedureUtils } from '../../utils/ProcedureUtils';
 import { SolutionManager } from '../../solution/solutionManager';
 import LoggerManager from '../../logger';
@@ -58,13 +59,14 @@ export class VariableHoverResolver {
      * Find and format hover for a local variable
      */
     async findLocalVariableHover(word: string, tokens: Token[], currentScope: Token, document: TextDocument, originalWord?: string, hoverLine?: number): Promise<Hover | null> {
-        const symbolInfo = this.symbolFinder.findLocalVariable(word, tokens, currentScope, document, originalWord);
+        const symbolInfo = this.symbolFinder.findLocalVariable(word, tokens, currentScope, document, originalWord, hoverLine);
         
         if (symbolInfo) {
             logger.info(`✅ Found variable info for ${word}: type=${symbolInfo.type}, line=${symbolInfo.location.line}`);
             const variableInfo: VariableInfo = {
                 type: symbolInfo.type,
-                line: symbolInfo.location.line
+                line: symbolInfo.location.line,
+                parentStructure: symbolInfo.parentStructure
             };
             // #302 follow-up (Mark): no class-definition appendix — the declaration line and
             // location already carry everything the hover needs; F12 on the type covers "where
@@ -163,8 +165,16 @@ export class VariableHoverResolver {
 
         // When shallowOnly=true (e.g. checking a MEMBER parent doc), skip the recursive
         // cross-file include chain traversal — the caller will handle includes separately.
-        if (shallowOnly) return null;
-        
+                if (shallowOnly) return null;
+
+        // #420: a predefined compiler flag (DLL_MODE, _DEBUG_, _C80_ …) is set by the
+        // compiler/project system and declared in NO source file — the cross-file walk
+        // below would cold-load the whole include universe (10.5s on IBSCommon.clw) to
+        // return null. Checked AFTER the current-file tiers so a user declaration of
+        // the same name still wins.
+        const flagHover = this.compilerFlagHover(searchWord);
+        if (flagHover) return flagHover;
+
         // Check MEMBER parent + its INCLUDE chain, plus current file's INCLUDE chain
         const crossFileResult = await this.memberLocator.findVariableTokenInParentChain(searchWord, document);
         if (crossFileResult) {
@@ -199,12 +209,29 @@ export class VariableHoverResolver {
             }
         }
 
+        // #420: see findGlobalVariableHover — never walk the include chain for a compiler flag.
+        const flagHover = this.compilerFlagHover(searchWord);
+        if (flagHover) return flagHover;
+
         const crossFileResult = await this.memberLocator.findVariableTokenInParentChain(searchWord, document);
         if (crossFileResult) {
             logger.info(`✅ Found "${searchWord}" in INCLUDE file: ${path.basename(crossFileResult.doc.uri)}`);
             return this.buildGlobalVariableHover(crossFileResult.token, crossFileResult.tokens, crossFileResult.doc);
         }
         return await this.searchEquatesFile(searchWord);
+    }
+
+    /** #420: documentation card for a predefined compiler flag, or null. */
+    private compilerFlagHover(word: string): Hover | null {
+        const flag = CompilerFlagService.getInstance().getFlag(word);
+        if (!flag) return null;
+        logger.info(`⏭️ [#420] "${word}" is a predefined compiler flag — no source declaration to find`);
+        return this.formatter.formatKeyword({
+            name: flag.name,
+            category: 'Predefined compiler flag',
+            description: flag.description,
+            syntax: `COMPILE('***', ${flag.name})   ! or OMIT('***', ${flag.name}), DLL(${flag.name.toLowerCase()})`
+        });
     }
 
     /**
@@ -268,12 +295,25 @@ export class VariableHoverResolver {
         const isProcedure = ProcedureUtils.isProcedureKeyword(typeInfo); // #247: PROCEDURE ≡ FUNCTION
         const isEquate = typeInfo === 'EQUATE';
 
+        // #350-adjacent — a PRE:Field reference (e.g. EVL:Lic) resolves through the same
+        // global-variable path as a true global scalar, but the token is actually a field of a
+        // PRE()'d FILE/QUEUE/GROUP (StructureProcessor stamps isStructureField/structureParent on
+        // it). Label it as a structure field — matching the "`X` Field:" wording
+        // StructureFieldResolver already uses for dot-notation access to the same field — instead
+        // of the generic "🌍 Global variable", which loses exactly the context the developer needs
+        // to tell a real global apart from a structure field reached via its PRE prefix.
+        const structureParentName = (globalVar as any).isStructureField
+            ? ((globalVar as any).structureParent?.label ?? (globalVar as any).structureParent?.value)
+            : undefined;
+
         if (isClassProperty) {
             const classLabel = containingClassName ? `Class property of \`${containingClassName}\`` : 'Class property';
             markdown.push(`🔷 ${classLabel}`);
         } else if (isInterfaceMethod) {
             const ifaceLabel = containingInterfaceName ? `Interface method of \`${containingInterfaceName}\`` : 'Interface method';
             markdown.push(`🔌 ${ifaceLabel}`);
+        } else if (structureParentName) {
+            markdown.push(`🔷 \`${structureParentName}\` field`);
         } else if (scopeInfo) {
             const scopeIcon = scopeInfo.type === 'global' ? '🌍' : '📦';
             const scopeLabel = isProcedure

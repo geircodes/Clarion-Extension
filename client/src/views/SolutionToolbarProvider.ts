@@ -9,9 +9,18 @@ logger.setLevel("error");
 
 export interface GraphStatus {
     status: 'building' | 'built';
+    /** Source files that resolved to a path on disk and entered the graph. */
     fileCount?: number;
     edgeCount?: number;
     durationMs?: number;
+    /** #434 — every source file the solution declares, resolved or not. */
+    sourceFileCount?: number;
+    /**
+     * #434 — declared source files that could not be resolved to a path and are
+     * therefore absent from the graph. Non-zero means the graph is incomplete
+     * and the features built on it will silently return nothing for those files.
+     */
+    unresolvedCount?: number;
 }
 
 export class SolutionToolbarProvider implements vscode.WebviewViewProvider {
@@ -175,7 +184,15 @@ export class SolutionToolbarProvider implements vscode.WebviewViewProvider {
                 const edges = this._graphStatus.edgeCount ?? 0;
                 const ms = this._graphStatus.durationMs;
                 const time = ms !== undefined ? ` ${ms}ms` : '';
-                rows.push({ label: 'Graph', value: `${files} files, ${edges} edges${time}` });
+                // #434 — "built" said nothing about completeness, so a graph
+                // missing most of the solution looked identical to a healthy one.
+                // Only mention it when something is actually missing.
+                const unresolved = this._graphStatus.unresolvedCount ?? 0;
+                const total = this._graphStatus.sourceFileCount;
+                const missing = unresolved > 0
+                    ? `, ⚠️ ${unresolved}${total ? ` of ${total}` : ''} unresolved`
+                    : '';
+                rows.push({ label: 'Graph', value: `${files} files, ${edges} edges${time}${missing}` });
             }
         }
 

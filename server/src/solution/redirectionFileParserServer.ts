@@ -2,6 +2,7 @@
 
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import LoggerManager from "../logger";
 import { serverSettings } from "../serverSettings";
 import { DirectoryFileIndex } from "./DirectoryFileIndex";
@@ -92,7 +93,12 @@ export function matchesActiveConfiguration(
   // custom-named build configuration (e.g. "Test") therefore still drives one
   // of the two sections through its debug-mode property. Name matching above
   // stays as tier 1 (it also serves custom [Test]-style sections, which the
-  // docs don't define but real .red files use); this tier maps an
+  // docs don't define but real .red files use — CONFIRMED EMPIRICALLY on
+  // 2026-09-06 against Clarion 12.0.14204: a solution built under a custom
+  // `MarksDebug` configuration routed all output to the `[MarksDebug]`
+  // section's paths, while `[Common]` stayed active alongside it. The docs'
+  // closed DEBUG/RELEASE/COMMON list is an INCOMPLETE description of the real
+  // system — do NOT "fix" this matcher toward it); this tier maps an
   // unrecognized configuration name onto its mode via the owning project's
   // cwproj (DebugSymbols/DebugType in the config-conditioned PropertyGroup).
   // When the mode cannot be determined at all, BOTH sections are treated as
@@ -116,12 +122,41 @@ export function matchesActiveConfiguration(
 
 const configModeCache = new Map<string, 'debug' | 'release' | 'unknown'>();
 const warnedUnknownConfigs = new Set<string>();
+const warnedUnexpandedMacros = new Set<string>();
 
+/**
+ * #435 — one warning per (macro, .red file) for a `%macro%` that resolved to
+ * nothing. Deliberately not per-line: a single undefined macro typically
+ * appears on many lines of the same file, and one useful line beats forty.
+ *
+ * Logged at `error`, not `warn`, on purpose: this module's logger is pinned to
+ * `"error"` (line 11), and `shouldLog` only emits levels at or above the set
+ * level — so a `warn` here would itself be silent, which is precisely the
+ * failure being reported. The condition is once-guarded, user-impacting and
+ * actionable, so it earns the channel that is actually on.
+ */
+function warnUnexpandedMacroOnce(macroName: string, redFile: string): void {
+  const key = `${macroName.toLowerCase()}|${redFile}`;
+  if (warnedUnexpandedMacros.has(key)) return;
+  warnedUnexpandedMacros.add(key);
+  logger.error(
+    `⚠️ [#435] Redirection macro "%${macroName}%" in ${redFile || '(unknown .red)'} has no value — ` +
+    `the literal text stays in the search path, so every directory on that line will fail to resolve. ` +
+    `Custom macros are defined under RedirectionFile/Macros in ClarionProperties.xml.`
+  );
+}
+
+/**
+ * Logged at `error` for the same reason as `warnUnexpandedMacroOnce` above:
+ * this module's logger is pinned to `"error"`, so the `warn` this previously
+ * used never reached anyone. The "one-time warning flags the state" promise in
+ * the #331 comment was therefore not being kept.
+ */
 function warnUnknownConfigurationOnce(configuration: string, projectPath?: string): void {
   const key = configuration.toLowerCase();
   if (warnedUnknownConfigs.has(key)) return;
   warnedUnknownConfigs.add(key);
-  logger.warn(
+  logger.error(
     `⚠️ [#331] Build configuration "${configuration}" is neither Debug/Release nor mappable to a mode` +
     `${projectPath ? ` via a cwproj in ${projectPath}` : ''} — treating BOTH [Debug] and [Release] ` +
     `sections as active for lookups so redirection entries are not silently lost.`
@@ -447,7 +482,7 @@ export class RedirectionFileParserServer {
           // multi-include non-determinism. See `docs/audits/include-chaining-audit-3f9f91c8.md`.
           const includeMatch = trimmed.match(/\{include\s+([^}]+)\}/i);
           if (includeMatch && includeMatch[1]) {
-            let includePath = this.resolveMacro(includeMatch[1]);
+            let includePath = this.resolveMacro(includeMatch[1], redFileToParse);
             includePath = path.isAbsolute(includePath) ? includePath : path.resolve(redPath, includePath);
             logger.info(`Processing include: ${includePath} from ${redFileToParse}`);
             this.parseRedFileRecursive(includePath, entries, false);
@@ -463,7 +498,7 @@ export class RedirectionFileParserServer {
             const raw = trimmed.substring(equalPos + 1).trim();
             
             // #356: pipe stop marker handled in the shared splitter.
-            const { paths, stopsSearch } = this.buildEntryPaths(raw);
+            const { paths, stopsSearch } = this.buildEntryPaths(raw, redFileToParse);
 
             const entry: RedirectionEntry = {
               redFile: redFileToParse,
@@ -558,7 +593,7 @@ export class RedirectionFileParserServer {
         if (trimmed.startsWith("{include")) {
           const includeMatch = trimmed.match(/\{include\s+([^}]+)\}/i);
           if (includeMatch && includeMatch[1]) {
-            let includePath = this.resolveMacro(includeMatch[1]);
+            let includePath = this.resolveMacro(includeMatch[1], redFileToParse);
             includePath = path.isAbsolute(includePath) ? includePath : path.resolve(redPath, includePath);
             logger.info(`Processing include: ${includePath} from ${redFileToParse}`);
 
@@ -584,7 +619,7 @@ export class RedirectionFileParserServer {
             const raw = trimmed.substring(equalPos + 1).trim();
 
             // #356: pipe stop marker handled in the shared splitter.
-            const { paths, stopsSearch } = this.buildEntryPaths(raw);
+            const { paths, stopsSearch } = this.buildEntryPaths(raw, redFileToParse);
 
             const entry: RedirectionEntry = {
               redFile: redFileToParse,
@@ -626,7 +661,7 @@ export class RedirectionFileParserServer {
    * a pipe-terminated value); either way the pipe is stripped, the dir kept,
    * the remaining dirs on the line dropped, and the entry marked stopsSearch.
    */
-  private buildEntryPaths(raw: string): { paths: string[]; stopsSearch: boolean } {
+  private buildEntryPaths(raw: string, redFile: string): { paths: string[]; stopsSearch: boolean } {
     const parts = raw.split(';');
     const paths: string[] = [];
     let stopsSearch = false;
@@ -637,7 +672,7 @@ export class RedirectionFileParserServer {
         p = p.slice(0, -1).trim();
       }
       if (p.length > 0) {
-        let resolved = this.resolveMacro(p);
+        let resolved = this.resolveMacro(p, redFile);
         if (resolved.endsWith('|')) {
           stopsSearch = true;
           resolved = resolved.slice(0, -1);
@@ -651,28 +686,61 @@ export class RedirectionFileParserServer {
     return { paths, stopsSearch };
   }
 
-  private resolveMacro(input: string): string {
+  /**
+   * Expands `%macro%` references in a redirection path segment.
+   *
+   * `redFile` is the `.red` file the segment came from. It is REQUIRED for
+   * `%THISDIR%`, which the Clarion 8 release notes define as "the directory of
+   * the *current* redirection file" — in an `{include}` chain that differs per
+   * file, so it cannot be hoisted to a parser-instance field.
+   */
+  private resolveMacro(input: string, redFile: string): string {
     // Quick check if there are any macros to resolve
     if (!input.includes('%')) {
       return path.normalize(input);
     }
-    
+
     const macroPattern = /%([^%]+)%/g;
     let resolved = input;
-    
+
     // Use a more efficient approach with a single replace call
     resolved = resolved.replace(macroPattern, (match, macroName) => {
       const macro = macroName.toLowerCase();
       let value = this.macros[macro];
 
       if (!value) {
-        if (macro === "bin") {
-          value = serverSettings.primaryRedirectionPath;
-        } else if (macro === "redname") {
-          value = path.basename(serverSettings.redirectionFile);
-        } else {
-          value = match;
+        switch (macro) {
+          case "bin":
+            value = serverSettings.primaryRedirectionPath;
+            break;
+          case "redname":
+            value = path.basename(serverSettings.redirectionFile);
+            break;
+          // #435 — the remaining macros documented in redirection_file.htm's
+          // "Additional Macros" block. %ROOT% and %REDDIR% need no case here:
+          // both live under RedirectionFile/Macros in ClarionProperties.xml and
+          // arrive via `this.macros`. %libpath% is deliberately absent — it is
+          // documented as [Copy]-section only (the folder holding the .lib when
+          // copying the matching .dll), so it has no bearing on source lookup.
+          case "thisdir":
+            value = redFile ? path.dirname(redFile) : match;
+            break;
+          case "winuserapplicationdata":
+            value = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+            break;
+          case "wincommonapplicationdata":
+            value = process.env.PROGRAMDATA || path.join("C:", "ProgramData");
+            break;
+          default:
+            value = match;
         }
+      }
+
+      // #435 — an unexpanded `%macro%` is left in the path verbatim, where it
+      // can never match a real directory. Every dir on that line is then dead,
+      // with nothing said anywhere — the same silent-degradation family as #434.
+      if (value === match) {
+        warnUnexpandedMacroOnce(macroName, redFile);
       }
 
       return value;

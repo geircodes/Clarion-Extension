@@ -25,6 +25,45 @@ export class TokenHelper {
             t.referencedFile !== undefined);
     }
 
+    /**
+     * The first non-comment token of a compiled module, if it is an INCLUDE
+     * carrying a file reference — i.e. the only place a MEMBER-via-INCLUDE shim
+     * can legally live.
+     *
+     * Language rule: MEMBER (or PROGRAM) must be the FIRST statement in the
+     * compiled token stream — only comments and blank lines may precede it. So
+     * when a file has no literal MEMBER header, the sole legal way for it to be
+     * a MEMBER module is that its first statement is an INCLUDE whose target
+     * (or, transitively, the target's own first-statement INCLUDE) starts with
+     * MEMBER. A MEMBER found in any LATER include would not compile — sweeping
+     * all INCLUDE tokens is therefore not just wasted I/O on the miss-path, it
+     * can invent a parent the compiler would reject.
+     *
+     * Returns undefined when the first statement is anything else (MEMBER and
+     * PROGRAM included — callers already handled the literal-header case via
+     * findMemberHeaderToken / findProgramHeaderToken).
+     */
+    public static findShimIncludeToken(tokens: Token[]): Token | undefined {
+        const first = tokens.find(t =>
+            t.type !== TokenType.Comment &&
+            t.type !== TokenType.LineContinuation);
+        if (first?.value?.toUpperCase() === 'INCLUDE' && first.referencedFile) return first;
+        return undefined;
+    }
+
+    /**
+     * MEMBER/PROGRAM references conventionally omit the file extension (e.g.
+     * `MEMBER('TargetProgram')`) — the Clarion compiler infers `.clw`.
+     * INCLUDE/LINK/MODULE targets always carry an explicit extension, so this is
+     * deliberately only applied to MEMBER targets. Both the redirection parser
+     * (matches by extension mask, e.g. the `*.clw = ...` line in a .red file) and
+     * SolutionManager.findFileWithExtension (matches by exact source-file
+     * basename) silently fail to resolve an extension-less name.
+     */
+    public static normalizeMemberFilename(name: string): string {
+        return /\.[^\\/.]+$/.test(name) ? name : `${name}.clw`;
+    }
+
     /** #337 — PROGRAM header lookup (ClarionDocument-typed, no line cap). */
     public static findProgramHeaderToken(tokens: Token[]): Token | undefined {
         return tokens.find(t =>
@@ -63,6 +102,56 @@ export class TokenHelper {
             anc = anc.parent;
         }
         return sawDataStructure;
+    }
+
+    /**
+     * Finds the nearest enclosing GROUP/QUEUE/FILE/RECORD/VIEW/REPORT/CLASS ancestor
+     * of `t`, for DISPLAY purposes (e.g. a hover noting "field of GROUP `Filter`").
+     * Unlike {@link requiresDotQualification} this doesn't stop early at a
+     * `structurePrefix` (PRE) or bail out on INTERFACE/MAP/MODULE — it's
+     * answering a different question ("what data structure, if any, directly
+     * contains this field") rather than "can a bare word legally bind here".
+     *
+     * CLASS is found differently from the others. DocumentStructure only
+     * `.parent`-links member tokens of RECORD/GROUP/QUEUE/FILE/VIEW/WINDOW/REPORT
+     * (its "Add label tokens as children" branch) — class members are deliberately
+     * left unlinked because their resolution lives in ClassMemberResolver, and
+     * several resolvers rely on `parent === undefined` / `isStructureField` to
+     * tell a bare label from a structure field. So the parent walk can never see
+     * a CLASS; when `structure` is supplied, fall back to its CLASS index instead
+     * (the same `isInClassBlock` + `getClasses` pair VariableHoverResolver already
+     * uses for global class properties). Display-only: nothing is stamped on the
+     * token, so no other consumer's view of it changes.
+     */
+    public static getEnclosingDataStructure(t: Token, structure?: DocumentStructure): { label: string; type: string } | undefined {
+        let anc = t.parent;
+        while (anc) {
+            if (anc.type === TokenType.Structure) {
+                const v = anc.value.toUpperCase();
+                if (TokenHelper.DOT_ONLY_STRUCTURES.has(v) && anc.label) {
+                    return { label: anc.label, type: v };
+                }
+            }
+            anc = anc.parent;
+        }
+
+        if (structure && structure.isInClassBlock(t.line)) {
+            // Nearest CLASS opening above `t` whose extent still covers it. CLASSes don't
+            // nest, so "nearest preceding that contains" is the unique owner.
+            let owner: Token | undefined;
+            for (const cls of structure.getClasses()) {
+                if (cls.line < t.line &&
+                    (cls.finishesAt === undefined || cls.finishesAt >= t.line) &&
+                    (!owner || cls.line > owner.line)) {
+                    owner = cls;
+                }
+            }
+            const label = owner?.label ?? owner?.value;
+            if (owner && label) {
+                return { label, type: 'CLASS' };
+            }
+        }
+        return undefined;
     }
 
     /**

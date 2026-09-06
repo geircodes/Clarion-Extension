@@ -46,6 +46,11 @@ logger.setLevel(dotAccessTraceEnabled ? "test" : "error");
  */
 const varWalkCache = new Map<string, string | null>(); // value = file path where found, or null
 let varWalkEpoch = -1;
+// #420: per-file column-0 label set + INCLUDE targets, one regex pass per file per
+// cross-file epoch (see the walk's note). null = unreadable. Tiny: labels only.
+interface LabelScan { labels: Set<string>; includes: string[] }
+const labelScanCache = new Map<string, LabelScan | null>();
+let labelScanEpoch = -1;
 
 export class MemberLocatorService {
     private sdi = StructureDeclarationIndexer.getInstance();
@@ -155,25 +160,17 @@ export class MemberLocatorService {
         // interface walk and #361's procedure walk).
         const timeSlice = makeTimeSlicer();
 
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const memberToken = await this.resolveMemberHeaderToken(tokens, currentDir, currentFilePath);
         if (memberToken?.referencedFile) {
-            const parentPath = this.resolveFilePath(memberToken.referencedFile, currentDir);
+            const parentPath = this.resolveFilePath(this.normalizeMemberFilename(memberToken.referencedFile), currentDir, currentFilePath);
             if (parentPath) {
-                const parentData = await this.loadDocument(parentPath);
-                if (parentData) {
-                    const parentVar = parentData.tokens.find(t =>
-                        this.isVariableLookupCandidate(t, parentData.doc, true) && this.tokenMatchesName(t, varName.toLowerCase())
-                    );
-                    if (parentVar) return { token: parentVar, tokens: parentData.tokens, doc: parentData.doc };
-                    const incResult = await this.searchIncludesForToken(
-                        varName, parentData.tokens, path.dirname(parentPath), new Set([parentPath.toLowerCase()]), timeSlice
-                    );
-                    if (incResult) return incResult;
-                }
+                const incResult = await this.searchParentChainForToken(varName, parentPath, timeSlice);
+                if (incResult) return incResult;
             }
         }
-
-        return this.searchIncludesForToken(varName, tokens, currentDir, new Set(), timeSlice);
+        return this.searchIncludeTargetsForToken(
+            varName, MemberLocatorService.includeTargetsFromTokens(tokens), currentDir, new Set(), timeSlice
+        );
     }
 
     /**
@@ -398,9 +395,9 @@ export class MemberLocatorService {
         }
 
         // 1.5 MEMBER parent file + its INCLUDE chain (common libsrc .clw layout)
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const memberToken = await this.resolveMemberHeaderToken(tokens, path.dirname(docPath), docPath);
         if (memberToken?.referencedFile) {
-            const parentPath = this.resolveFilePath(memberToken.referencedFile, path.dirname(docPath), docPath);
+            const parentPath = this.resolveFilePath(this.normalizeMemberFilename(memberToken.referencedFile), path.dirname(docPath), docPath);
             if (parentPath) {
                 const parentData = await this.loadDocument(parentPath);
                 if (parentData) {
@@ -565,11 +562,11 @@ export class MemberLocatorService {
      */
     public async warmMemberParent(document: TextDocument): Promise<boolean> {
         const tokens = this.tokenCache.getTokens(document);
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const docPath = decodeURIComponent(document.uri.replace(/^file:\/\/\//, '')).replace(/\//g, '\\');
+        const memberToken = await this.resolveMemberHeaderToken(tokens, path.dirname(docPath), docPath);
         if (!memberToken?.referencedFile) return false;
 
-        const docPath = decodeURIComponent(document.uri.replace(/^file:\/\/\//, '')).replace(/\//g, '\\');
-        const parentPath = this.resolveFilePath(memberToken.referencedFile, path.dirname(docPath), docPath);
+        const parentPath = this.resolveFilePath(this.normalizeMemberFilename(memberToken.referencedFile), path.dirname(docPath), docPath);
         if (!parentPath) return false;
 
         // Already tokenized (open in the editor, or warmed by another member sharing this
@@ -642,57 +639,196 @@ export class MemberLocatorService {
         const currentFilePath = decodeURIComponent(document.uri.replace(/^file:\/\/\//, '')).replace(/\//g, '\\');
         const currentDir = path.dirname(currentFilePath);
 
+                // #420: same pre-filtered walk as findVariableTokenInParentChainUncached.
+        // Deliberately NOT time-sliced: this path is reached from the deferred
+        // diagnostics pipeline (ReturnValueDiagnostics -> resolveVariableType) while
+        // a hover is in flight, and adding yields here let that background work
+        // interleave with the hover (NetDebugTrace cold hover 1.06s -> 2.5s on the
+        // ap1.sln rig). With the label pre-filter a miss no longer tokenizes, so the
+        // walk is short enough to run without yielding, exactly as it did before.
+        const timeSlice = async (): Promise<void> => { /* no yield — see above */ };
+
         // 2. MEMBER parent file (and its INCLUDE chain)
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const memberToken = await this.resolveMemberHeaderToken(tokens, currentDir, currentFilePath);
         if (memberToken?.referencedFile) {
-            const parentPath = this.resolveFilePath(memberToken.referencedFile, currentDir);
+            const parentPath = this.resolveFilePath(this.normalizeMemberFilename(memberToken.referencedFile), currentDir, currentFilePath);
             if (parentPath) {
-                const parentData = await this.loadDocument(parentPath);
-                if (parentData) {
-                    const parentVar = parentData.tokens.find(t =>
-                        this.isVariableLookupCandidate(t, parentData.doc, true) && this.tokenMatchesName(t, varName.toLowerCase())
-                    );
-                    if (parentVar) return { token: parentVar, tokens: parentData.tokens, doc: parentData.doc };
-                    const incResult = await this.searchIncludesForToken(
-                        varName, parentData.tokens, path.dirname(parentPath), new Set([parentPath.toLowerCase()])
-                    );
-                    if (incResult) return incResult;
-                }
+                const incResult = await this.searchParentChainForToken(varName, parentPath, timeSlice);
+                if (incResult) return incResult;
             }
         }
 
         // 3. Current file INCLUDE chain
-        return this.searchIncludesForToken(varName, tokens, currentDir, new Set());
+        return this.searchIncludeTargetsForToken(
+            varName, MemberLocatorService.includeTargetsFromTokens(tokens), currentDir, new Set(), timeSlice
+        );
     }
 
-    /** Recursively searches INCLUDE files for a label token. */
+    // ---------------------------------------------------------------------------
+    // #420 — the cross-file INCLUDE walk, with a column-0 LABEL pre-filter.
+    //
+    // The walk's candidate predicate (isVariableLookupCandidate + tokenMatchesName)
+    // can only ever match a token whose LABEL sits at column 0 of some line — a
+    // Label token, or the label of a Structure/PROCEDURE line. So a file with no
+    // line beginning with the name (case-insensitive, whole label) cannot possibly
+    // declare it, and there is no reason to tokenize it. The tokenize is the
+    // expensive part: cold-loading the include universe of an 11K-line generated
+    // PROGRAM module cost ~10.5s per NEW undeclared word (`DLL(dll_mode)` in
+    // IBSCommon.clw), all of it in this walk, to return null.
+    //
+    // Each reachable file is scanned ONCE per cross-file epoch for its column-0
+    // labels and its INCLUDE targets (one regex pass over the text; the text is
+    // not kept), and that tiny record is cached module-wide. A miss-walk is then
+    // a Set lookup per file — no I/O, no allocation. That matters because the
+    // undeclared-variable diagnostic's augment pass runs hundreds of such
+    // lookups in the background: re-reading the universe per word (the first
+    // cut of this fix) churned enough garbage to double an unrelated
+    // synchronous hover through GC pauses. Invalidation is the cross-file
+    // epoch — the same guarantee the #373 result cache above already relies on.
+    //
+    // Recursion still follows every file's INCLUDEs — a skipped file's targets
+    // come from the cached scan (same `INCLUDE('name'…)` shape the tokenizer
+    // recognises), so nothing reachable is lost. Files already cached fresh in
+    // CrossFileCache are used as before. Positive results are unchanged: a file
+    // whose label set contains the name is loaded and searched exactly as it
+    // always was.
+    // ---------------------------------------------------------------------------
+
+    private static includeTargetsFromTokens(tokens: Token[]): string[] {
+        return tokens
+            .filter(t => t.value?.toUpperCase() === 'INCLUDE' && t.referencedFile)
+            .map(t => t.referencedFile!);
+    }
+
+    /** One pass over raw text: every column-0 label (lower-cased) and every INCLUDE target. */
+    private static scanLabelsAndIncludes(text: string): LabelScan {
+        if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+        const labels = new Set<string>();
+        const includes: string[] = [];
+        const labelRe = /^[A-Za-z_][\w:]*/gm;
+        let m: RegExpExecArray | null;
+        while ((m = labelRe.exec(text)) !== null) labels.add(m[0].toLowerCase());
+        const incRe = /^[ \t]*INCLUDE[ \t]*\([ \t]*'([^']+)'/gim;
+        while ((m = incRe.exec(text)) !== null) includes.push(m[1]);
+        return { labels, includes };
+    }
+
+    /** Cached per-file label/include scan for the current cross-file epoch (see the #420 note). */
+    private async getLabelScan(filePath: string): Promise<LabelScan | null> {
+        const epoch = getCrossFileEpoch();
+        if (epoch !== labelScanEpoch) {
+            labelScanCache.clear();
+            labelScanEpoch = epoch;
+        }
+        const key = filePath.toLowerCase();
+        const cached = labelScanCache.get(key);
+        if (cached !== undefined) return cached;
+        let text: string;
+        try {
+            text = await fs.promises.readFile(filePath, 'utf-8');
+        } catch {
+            labelScanCache.set(key, null);
+            return null;
+        }
+        const scan = MemberLocatorService.scanLabelsAndIncludes(text);
+        labelScanCache.set(key, scan);
+        return scan;
+    }
+
+    /**
+     * Cheap answer to "could `filePath` declare the label?": returns the loaded
+     * doc+tokens when the file is already cached fresh or its label set contains
+     * the name (the file is then loaded and cached exactly as before); otherwise
+     * just its INCLUDE targets so the walk can keep recursing. `null` = unreadable.
+     */
+    private async probeFileForLabel(
+        filePath: string,
+        nameLower: string
+    ): Promise<{ loaded: { doc: TextDocument; tokens: Token[] } | null; includes: string[] } | null> {
+        if (this.crossFileCache?.hasFresh(filePath)) {
+            const loaded = await this.loadDocument(filePath);
+            return loaded ? { loaded, includes: [] } : null;
+        }
+        const scan = await this.getLabelScan(filePath);
+        if (!scan) return null;
+        if (scan.labels.has(nameLower)) {
+            const loaded = await this.loadDocument(filePath);
+            return { loaded, includes: scan.includes };
+        }
+        return { loaded: null, includes: scan.includes };
+    }
+
+    /** MEMBER parent file + its INCLUDE chain, pre-filtered. Does NOT search the current file. */
+    private async searchParentChainForToken(
+        varName: string,
+        parentPath: string,
+        timeSlice: () => Promise<void>
+    ): Promise<{ token: Token; tokens: Token[]; doc: TextDocument } | null> {
+        const nameLower = varName.toLowerCase();
+        const probe = await this.probeFileForLabel(parentPath, nameLower);
+        if (!probe) return null;
+        let targets: string[];
+        if (probe.loaded) {
+            const { doc, tokens } = probe.loaded;
+            const parentVar = tokens.find(t =>
+                this.isVariableLookupCandidate(t, doc, true) && this.tokenMatchesName(t, nameLower)
+            );
+            if (parentVar) return { token: parentVar, tokens, doc };
+            targets = MemberLocatorService.includeTargetsFromTokens(tokens);
+        } else {
+            targets = probe.includes;
+        }
+        return this.searchIncludeTargetsForToken(
+            varName, targets, path.dirname(parentPath), new Set([parentPath.toLowerCase()]), timeSlice
+        );
+    }
+
+    /** Recursively searches INCLUDE files for a label token (token-list entry point; see the #420 note above). */
     private async searchIncludesForToken(
         varName: string,
         tokens: Token[],
         fromDir: string,
         visited: Set<string>,
+        timeSlice: () => Promise<void> = makeTimeSlicer()
+    ): Promise<{ token: Token; tokens: Token[]; doc: TextDocument } | null> {
+        return this.searchIncludeTargetsForToken(
+            varName, MemberLocatorService.includeTargetsFromTokens(tokens), fromDir, visited, timeSlice
+        );
+    }
+
+    private async searchIncludeTargetsForToken(
+        varName: string,
+        includeTargets: string[],
+        fromDir: string,
+        visited: Set<string>,
         // #373: ONE slicer threaded through the whole recursive walk (previously
         // no yield at all — every reachable INCLUDE cold-loaded + tokenized in
         // one synchronous stretch).
-        timeSlice: () => Promise<void> = makeTimeSlicer()
+        timeSlice: () => Promise<void>
     ): Promise<{ token: Token; tokens: Token[]; doc: TextDocument } | null> {
-        const includeTokens = tokens.filter(t => t.value?.toUpperCase() === 'INCLUDE' && t.referencedFile);
-        for (const inc of includeTokens) {
+        const nameLower = varName.toLowerCase();
+        for (const target of includeTargets) {
             await timeSlice();
-            const resolvedPath = this.resolveFilePath(inc.referencedFile!, fromDir);
+            const resolvedPath = this.resolveFilePath(target, fromDir);
             if (!resolvedPath || visited.has(resolvedPath.toLowerCase())) continue;
             visited.add(resolvedPath.toLowerCase());
-
-            const data = await this.loadDocument(resolvedPath);
-            if (!data) continue;
-
-            const found = data.tokens.find(t =>
-                this.isVariableLookupCandidate(t, data.doc, true) &&
-                this.tokenMatchesName(t, varName.toLowerCase())
+            const probe = await this.probeFileForLabel(resolvedPath, nameLower);
+            if (!probe) continue;
+            let nestedTargets: string[];
+            if (probe.loaded) {
+                const { doc, tokens } = probe.loaded;
+                const found = tokens.find(t =>
+                    this.isVariableLookupCandidate(t, doc, true) &&
+                    this.tokenMatchesName(t, nameLower)
+                );
+                if (found) return { token: found, tokens, doc };
+                nestedTargets = MemberLocatorService.includeTargetsFromTokens(tokens);
+            } else {
+                nestedTargets = probe.includes;
+            }
+            const nested = await this.searchIncludeTargetsForToken(
+                varName, nestedTargets, path.dirname(resolvedPath), visited, timeSlice
             );
-            if (found) return { token: found, tokens: data.tokens, doc: data.doc };
-
-            const nested = await this.searchIncludesForToken(varName, data.tokens, path.dirname(resolvedPath), visited, timeSlice);
             if (nested) return nested;
         }
         return null;
@@ -749,9 +885,9 @@ export class MemberLocatorService {
         if (found) return { token: found, tokens, doc: document };
 
         // 2. MEMBER parent + its include chain
-        const memberToken = TokenHelper.findMemberHeaderToken(tokens);
+        const memberToken = await this.resolveMemberHeaderToken(tokens, currentDir, currentFilePath);
         if (memberToken?.referencedFile) {
-            const parentPath = this.resolveFilePath(memberToken.referencedFile, currentDir);
+            const parentPath = this.resolveFilePath(this.normalizeMemberFilename(memberToken.referencedFile), currentDir, currentFilePath);
             if (parentPath) {
                 const parentData = await this.loadDocument(parentPath);
                 if (parentData) {
@@ -772,6 +908,30 @@ export class MemberLocatorService {
     private findPrefixFieldInTokens(prefix: string, fieldName: string, tokens: Token[]): Token | undefined {
         const prefixUpper = prefix.toUpperCase();
         const fieldUpper = fieldName.toUpperCase();
+
+        // Prefer an actual FIELD of the structure over the structure's own PRE()'d declaration
+        // token. A field can coincidentally share its name with the enclosing structure (e.g. a
+        // FILE named `Evl` containing a field also named `Evl` — real shape in this codebase's
+        // event-log dictionary entry) — StructureProcessor stamps `structurePrefix` on the
+        // declaring structure token ITSELF as well as on its fields, so without this the
+        // declaration token wins the search below simply by appearing first in document order.
+        //
+        // `t.line > t.structureParent.line` additionally excludes a DocumentStructure quirk: the
+        // structure is pushed onto its structure-stack the moment its own keyword token (FILE,
+        // QUEUE, ...) is seen, so any later Variable/StructurePrefix-type token on THAT SAME
+        // declaration line — e.g. the `GLOB:Owner` in `OWNER(GLOB:Owner)`, or the `Evl` argument
+        // inside `PRE(Evl)` on the FILE's own line — gets mistagged isStructureField=true with the
+        // structure's own prefix too, even though it's an attribute argument, not a real field.
+        // Real fields are always declared on later lines, so this line comparison cleanly excludes
+        // that noise without touching the tokenizer's core (widely-depended-on) structure walker.
+        const fieldMatch = tokens.find(t =>
+            t.isStructureField &&
+            t.structurePrefix?.toUpperCase() === prefixUpper &&
+            t.value.toUpperCase() === fieldUpper &&
+            t.structureParent !== undefined && t.line > t.structureParent.line
+        );
+        if (fieldMatch) return fieldMatch;
+
         return tokens.find(t =>
             t.structurePrefix?.toUpperCase() === prefixUpper &&
             // Label tokens: t.value is the name; Structure tokens (nested GROUP etc): t.label is the name
@@ -1641,9 +1801,11 @@ export class MemberLocatorService {
         const isReference = idx + 1 < lineTokens.length && lineTokens[idx + 1].type === TokenType.ReferenceVariable;
 
         if (!typeStr || typeStr === 'UNKNOWN') {
+            // Bare local structure declaration, no `(TypeName)` argument: `Label CLASS ... END`,
+            // same shape as `Label QUEUE/GROUP/FILE ... END`. The label doubles as both the type
+            // and the single instance — use it as the navigable type name for all four alike.
             if (token.type === TokenType.Structure && token.label) {
                 const structureKeyword = token.value.toUpperCase();
-                if (structureKeyword === 'CLASS') return null;
                 return {
                     typeName: token.label,
                     isClass: structureKeyword === 'CLASS',
@@ -1654,12 +1816,12 @@ export class MemberLocatorService {
                 const structureToken = lineTokens.find(t =>
                     t.type === TokenType.Structure &&
                     t.start > token.start &&
-                    ['QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
+                    ['CLASS', 'QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
                 );
                 if (structureToken) {
                     return {
                         typeName: token.value,
-                        isClass: false,
+                        isClass: structureToken.value.toUpperCase() === 'CLASS',
                         isReference
                     };
                 }
@@ -1686,7 +1848,6 @@ export class MemberLocatorService {
             // Use its own label as navigable structure name for chained lookups.
             if (token.type === TokenType.Structure && token.label) {
                 const structureKeyword = typeStr.toUpperCase();
-                if (structureKeyword === 'CLASS') return null;
                 return {
                     typeName: token.label,
                     isClass: structureKeyword === 'CLASS',
@@ -1697,7 +1858,7 @@ export class MemberLocatorService {
                 const structureToken = lineTokens.find(t =>
                     t.type === TokenType.Structure &&
                     t.start > token.start &&
-                    ['QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
+                    ['CLASS', 'QUEUE', 'GROUP', 'FILE'].includes(t.value.toUpperCase())
                 );
                 if (structureToken) {
                     const structureKeyword = structureToken.value.toUpperCase();
@@ -1724,6 +1885,60 @@ export class MemberLocatorService {
      * ImplementationProvider / MethodHoverResolver already do via their
      * direct-fix-sites.
      */
+    /**
+     * Resolves the MEMBER token for a file, following its FIRST statement into an
+     * INCLUDE'd shim when no literal MEMBER statement is present locally.
+     *
+     * Project convention seen across many member modules: the real MEMBER('program')
+     * statement lives in a small generated shim file reached via e.g. INCLUDE('member.clw')
+     * rather than being written directly in each member — this lets the same shared source
+     * files belong to different PROGRAMs across projects by swapping just that one shim.
+     * TokenHelper.findMemberHeaderToken() only sees literal tokens in the tokens it's given,
+     * so it can never find a MEMBER hidden behind that indirection on its own.
+     *
+     * Because MEMBER/PROGRAM must be the first statement of the compiled token stream
+     * (see TokenHelper.findShimIncludeToken), only the FIRST statement of each file is
+     * ever consulted: if it isn't an INCLUDE, the file cannot be a shim-headed member
+     * module and the walk stops immediately — the common miss (a definition include, a
+     * PROGRAM file, plain data) costs zero file reads. Each hop reads exactly one file;
+     * MAX_SHIM_HOPS bounds the legal-but-rare chained-shim case and a visited set stops
+     * include cycles.
+     *
+     * `fromFile` (the CURRENT file's own path, not the include target) must be threaded through
+     * to resolveFilePath's owner-project-first redirection (#328) — some projects use a DIFFERENT
+     * same-named shim per project (e.g. many `member.clw` files, one per project, each redirecting
+     * to a different MEMBER target so the same shared source tree can belong to different PROGRAMs).
+     * Omitting it makes redirection fall back to an unscoped solution-wide walk that can resolve to
+     * the WRONG project's shim.
+     */
+    private static readonly MAX_SHIM_HOPS = 3;
+    private async resolveMemberHeaderToken(tokens: Token[], fromDir: string, fromFile?: string): Promise<Token | undefined> {
+        const visited = new Set<string>();
+        for (let hop = 0; hop <= MemberLocatorService.MAX_SHIM_HOPS; hop++) {
+            const direct = TokenHelper.findMemberHeaderToken(tokens);
+            if (direct) return direct;
+
+            const shimInclude = TokenHelper.findShimIncludeToken(tokens);
+            if (!shimInclude) return undefined;
+            const resolvedPath = this.resolveFilePath(shimInclude.referencedFile!, fromDir, fromFile);
+            if (!resolvedPath) return undefined;
+            const key = resolvedPath.toLowerCase();
+            if (visited.has(key)) return undefined;
+            visited.add(key);
+            const data = await this.loadDocument(resolvedPath);
+            if (!data) return undefined;
+            tokens = data.tokens;
+            fromDir = path.dirname(resolvedPath);
+            fromFile = resolvedPath;
+        }
+        return undefined;
+    }
+
+    /** See TokenHelper.normalizeMemberFilename — kept as a thin delegate for existing call sites. */
+    private normalizeMemberFilename(name: string): string {
+        return TokenHelper.normalizeMemberFilename(name);
+    }
+
     private resolveFilePath(filename: string, fromDir: string, fromFile?: string): string | null {
         const sm = SolutionManager.getInstance();
         if (sm?.solution) {

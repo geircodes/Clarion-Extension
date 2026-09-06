@@ -105,6 +105,13 @@ jobs:
           HUSKY: 0
         run: |
           git checkout master
+          # Dependabot reads .github/dependabot.yml from master, so master must carry the
+          # NEW active version branch as target-branch (see the comment in that file).
+          # Release machinery: the only non-release-merge commit master ever receives.
+          sed -i 's/^\([[:space:]]*target-branch:[[:space:]]*\).*/\1"version-${{ inputs.next_version }}"/' .github/dependabot.yml
+          git add .github/dependabot.yml
+          git commit -m "chore(dependabot): target version-${{ inputs.next_version }}"
+          git push origin master
           git checkout -b version-${{ inputs.next_version }}
           npm version ${{ inputs.next_version }} --no-git-tag-version
           node -e "
@@ -117,6 +124,46 @@ jobs:
           git add package.json package-lock.json CHANGELOG.md
           git commit -m "chore: Bump version to ${{ inputs.next_version }} and add changelog stub"
           git push origin version-${{ inputs.next_version }}
+
+      - name: Point the default branch at the next version branch
+        # CONTRIBUTING tells contributors to target the current development branch,
+        # and GitHub pre-selects the repository default as a PR's base. When the
+        # default is left on master, every external PR arrives mis-based: #439 came
+        # in as 70 files / +4930 for what was actually a 3-file / +129 change,
+        # because the diff picked up everything already merged into the version
+        # branch. The contributor had done nothing wrong.
+        #
+        # Must run BEFORE the delete below: GitHub will not remove a branch that is
+        # currently the default.
+        #
+        # GITHUB_TOKEN CANNOT do this. Changing the default branch is a repository
+        # settings write, and `administration` is a fine-grained-PAT permission, not
+        # one of the `permissions:` keys a workflow token accepts — declaring it
+        # makes the whole workflow file invalid. So this step uses an OPTIONAL PAT
+        # secret and degrades to a reminder when it is absent, which is the state
+        # today (only VSCE_PAT is configured).
+        #
+        # To automate it: create a PAT with repo-admin rights and add it as
+        # REPO_ADMIN_TOKEN. Until then the release still completes and the log
+        # carries the one-line manual fix.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+        run: |
+          NEXT="version-${{ inputs.next_version }}"
+          MANUAL="gh repo edit ${GITHUB_REPOSITORY} --default-branch $NEXT"
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::No REPO_ADMIN_TOKEN secret — cannot set the default branch automatically."
+            echo "::warning::Run this now: $MANUAL"
+            echo "::warning::Until it is set, external PRs arrive based on master and need retargeting (see #439)."
+            exit 0
+          fi
+          if gh api -X PATCH "repos/${GITHUB_REPOSITORY}" -f default_branch="$NEXT" --silent; then
+            echo "✅ Default branch set to $NEXT — new PRs will now target it by default."
+          else
+            echo "::warning::REPO_ADMIN_TOKEN did not have rights to set the default branch."
+            echo "::warning::Run this by hand: $MANUAL"
+          fi
 
       - name: Delete released version branch
         # Runs only if every prior step succeeded (merge, release, publish, next-branch).

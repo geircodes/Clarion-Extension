@@ -382,7 +382,13 @@ function validateCrossFilePlainCalls(
         if (!codeRanges.some(r => lineIdx >= r.start && lineIdx <= r.end)) continue;
 
         const rawLine = docLines[lineIdx];
-        const stripped = rawLine.replace(/!.*$/, '').trim();
+        // CRLF: `docLines` comes from a plain split('\n'), so a CRLF file leaves
+        // a trailing '\r' on every line. `.` never matches '\r' and `$` (no /m)
+        // demands the literal string end, so on a line ending in a trailing
+        // comment `!.*$` never matches at all — the comment silently survives
+        // into `stripped`. Dropping the `$` fixes it: `.` already stops at any
+        // line terminator, so `!.*` strips to end-of-line either way.
+        const stripped = rawLine.replace(/!.*/, '').trim();
         if (!stripped) continue;
 
         if (ASSIGN_RE.test(stripped)) continue;
@@ -838,7 +844,7 @@ export function validateDiscardedReturnValuesForPlainCalls(
         if (!codeRanges.some(r => lineIdx >= r.start && lineIdx <= r.end)) continue;
 
         const rawLine = docLines[lineIdx];
-        const stripped = rawLine.replace(/!.*$/, '').trim();
+        const stripped = rawLine.replace(/!.*/, '').trim(); // CRLF-safe — see comment above the first occurrence
         if (!stripped) continue;
 
         if (ASSIGN_RE.test(stripped)) continue;
@@ -899,7 +905,11 @@ export async function validateDiscardedReturnValues(
         return diagnostics;
     }
 
-    const DOTCALL_PREFIX = /^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)/;
+    // Receiver AND method names can legally contain ':' (e.g. `My:StringTheory`,
+    // `My:My:Method` — see the tokenizer's own Label pattern), so both groups
+    // must allow it, or a colon-named local/member silently falls out of this
+    // whole diagnostic.
+    const DOTCALL_PREFIX = /^([A-Za-z_][A-Za-z0-9_:]*)\.([A-Za-z_][A-Za-z0-9_:]*)/;
 
     // #158 Phase B Priority 1 — per-call-site memoization. Pre-#158 this loop
     // called `memberLocator.findMemberInClass` / `resolveDotAccess` once PER
@@ -1066,7 +1076,7 @@ export async function validateDiscardedReturnValues(
         if (!range) continue;
 
         const rawLine = docLines[lineIdx];
-        const stripped = rawLine.replace(/!.*$/, '').trim();
+        const stripped = rawLine.replace(/!.*/, '').trim(); // CRLF-safe — see comment above the first occurrence
         if (!stripped) continue;
 
         const prefixMatch = stripped.match(DOTCALL_PREFIX);
