@@ -10,17 +10,17 @@
  * specifically (QUEUE/GROUP/FILE already resolved to themselves).
  *
  * The real-world repro that surfaced this also had colons in the receiver AND
- * method names (`MyOwn:CLASS.My:My:Method()`) — that half is a SEPARATE fix
- * (DOTCALL_PREFIX in ReturnValueDiagnostics.ts, `fix/discarded-return-colon-receiver`,
- * not part of this branch) and isn't exercisable end-to-end here alone, since
- * without it the line never matches DOTCALL_PREFIX regardless of this fix. The
- * plain-name test below proves this CLASS fix end-to-end through the real
- * diagnostic; `MemberLocatorService.test.ts`'s
- * "resolves bare local CLASS self-instance ... → member" pins the colon-named
- * case directly at the resolveDotAccess layer (hover/F12/Ctrl+F12's own entry
- * point), bypassing DOTCALL_PREFIX. Once both PRs land, the colon+bare-CLASS
- * combo works through the full pipeline too — confirmed manually, not repeated
- * here as an automated test to avoid a cross-branch test dependency.
+ * method names (`MyOwn:CLASS.My:My:Method()`). That half is a separate fix —
+ * the `DOTCALL_PREFIX` widening in `ReturnValueDiagnostics.ts` — which the
+ * author noted as not yet landed when this branch was written, so the combined
+ * case was left as a manual check rather than an automated cross-branch
+ * dependency.
+ *
+ * It has since landed (#427, merged), so `DOTCALL_PREFIX` already accepts `:`
+ * in both the receiver and the method name. The combined case is therefore
+ * exercisable here after all, and is pinned by the third test below — the
+ * shape a user actually reported, now covered end-to-end through the real
+ * diagnostic rather than by hand.
  */
 
 import * as assert from 'assert';
@@ -97,5 +97,36 @@ suite('ReturnValueDiagnostics — bare local CLASS self-instance receiver', () =
         const diags = await validateDiscardedReturnValues(tokens, doc, locator);
 
         assert.strictEqual(discarded(diags).length, 0, 'PROC-attributed method must not warn');
+    });
+
+    test('the original reported repro — colons in BOTH receiver and method — end to end', async () => {
+        // `MyOwn:CLASS.My:My:Method()`. This needs two independent fixes to reach
+        // the diagnostic at all: #427's DOTCALL_PREFIX widening so the line matches
+        // as a dot-call, and the bare-CLASS receiver resolution this file covers.
+        // Both are now on this branch, so the shape a user actually reported is
+        // pinned end-to-end instead of by hand. If either regresses, this fails
+        // while the plain-name test above may still pass — that asymmetry is the
+        // point of keeping both.
+        const code = [
+            "  MEMBER('prog.clw')",
+            '  MAP',
+            '  END',
+            'MyOwn:CLASS CLASS',
+            'My:My:Method  PROCEDURE(), LONG',
+            '            END',
+            'Caller PROCEDURE()',
+            '  CODE',
+            '  MyOwn:CLASS.My:My:Method()',
+        ].join('\n');
+        const doc = createDoc('rvdBareClassColon.clw', code);
+        const tokens = TokenCache.getInstance().getTokens(doc);
+        const locator = new MemberLocatorService();
+        const diags = await validateDiscardedReturnValues(tokens, doc, locator);
+
+        const warns = discarded(diags);
+        assert.strictEqual(warns.length, 1,
+            `colon-named bare CLASS self-instance must warn exactly once; got: ${warns.map(w => w.message).join(' | ')}`);
+        assert.ok(warns[0].message.includes("'MyOwn:CLASS.My:My:Method'"),
+            `the message must name the full colon-bearing receiver and method; got: ${warns[0].message}`);
     });
 });
