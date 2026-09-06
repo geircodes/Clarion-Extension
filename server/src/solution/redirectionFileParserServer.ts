@@ -128,23 +128,35 @@ const warnedUnexpandedMacros = new Set<string>();
  * #435 — one warning per (macro, .red file) for a `%macro%` that resolved to
  * nothing. Deliberately not per-line: a single undefined macro typically
  * appears on many lines of the same file, and one useful line beats forty.
+ *
+ * Logged at `error`, not `warn`, on purpose: this module's logger is pinned to
+ * `"error"` (line 11), and `shouldLog` only emits levels at or above the set
+ * level — so a `warn` here would itself be silent, which is precisely the
+ * failure being reported. The condition is once-guarded, user-impacting and
+ * actionable, so it earns the channel that is actually on.
  */
 function warnUnexpandedMacroOnce(macroName: string, redFile: string): void {
   const key = `${macroName.toLowerCase()}|${redFile}`;
   if (warnedUnexpandedMacros.has(key)) return;
   warnedUnexpandedMacros.add(key);
-  logger.warn(
+  logger.error(
     `⚠️ [#435] Redirection macro "%${macroName}%" in ${redFile || '(unknown .red)'} has no value — ` +
     `the literal text stays in the search path, so every directory on that line will fail to resolve. ` +
     `Custom macros are defined under RedirectionFile/Macros in ClarionProperties.xml.`
   );
 }
 
+/**
+ * Logged at `error` for the same reason as `warnUnexpandedMacroOnce` above:
+ * this module's logger is pinned to `"error"`, so the `warn` this previously
+ * used never reached anyone. The "one-time warning flags the state" promise in
+ * the #331 comment was therefore not being kept.
+ */
 function warnUnknownConfigurationOnce(configuration: string, projectPath?: string): void {
   const key = configuration.toLowerCase();
   if (warnedUnknownConfigs.has(key)) return;
   warnedUnknownConfigs.add(key);
-  logger.warn(
+  logger.error(
     `⚠️ [#331] Build configuration "${configuration}" is neither Debug/Release nor mappable to a mode` +
     `${projectPath ? ` via a cwproj in ${projectPath}` : ''} — treating BOTH [Debug] and [Release] ` +
     `sections as active for lookups so redirection entries are not silently lost.`

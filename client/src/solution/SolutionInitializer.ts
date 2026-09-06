@@ -347,6 +347,8 @@ export async function initializeSolution(
                 fileCount?: number;
                 edgeCount?: number;
                 durationMs?: number;
+                sourceFileCount?: number;
+                unresolvedCount?: number;
             }) => {
                 setToolbarGraphStatus(params);
             })
