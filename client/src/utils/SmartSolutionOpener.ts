@@ -5,6 +5,7 @@ import { SettingsStorageManager } from '../utils/SettingsStorageManager';
 import { GlobalSolutionHistory } from '../utils/GlobalSolutionHistory';
 import { setGlobalClarionSelection } from '../globals';
 import { readActiveConfigFromSlnCache, configNameFromFull } from './SlnCacheUtils';
+import { resolveValidConfiguration } from './ConfigurationValidator';
 import LoggerManager from './LoggerManager';
 import { PathUtils } from '../PathUtils';
 import * as path from 'path';
@@ -112,13 +113,32 @@ export class SmartSolutionOpener {
                         - version: ${existingSettings.version}
                         - configuration: ${existingSettings.configuration}`);
 
+                    // #437 — `validateExistingSettings` above checks that the files
+                    // exist and the version is non-empty; it deliberately says
+                    // nothing about the configuration. That check used to live only
+                    // in `initializeSolution`, which `clarion.openDetectedSolution`
+                    // calls afterwards but `clarion.openRecentSolution` (same folder)
+                    // does not — so a stale configuration could be adopted here and
+                    // stay in force for the session, collapsing redirection to
+                    // [Common] (#293) with nothing reported. Validate before the
+                    // value is written anywhere.
+                    const resolved = await resolveValidConfiguration(
+                        solutionPath,
+                        existingSettings.configuration
+                    );
+                    if (resolved.changed) {
+                        logger.info(`✅ Configuration ${resolved.reason}: ` +
+                            `${existingSettings.configuration || '(empty)'} → ${resolved.configuration}`);
+                    }
+                    const configuration = resolved.configuration;
+
                     // Update globals BEFORE saving to settings so that onDidChangeConfiguration
                     // handlers that fire during the save see the correct (new) solution path.
                     await setGlobalClarionSelection(
                         solutionPath,
                         existingSettings.propertiesFile,
                         existingSettings.version,
-                        existingSettings.configuration,
+                        configuration,
                         true // skipSave — we save explicitly below
                     );
 
@@ -126,7 +146,7 @@ export class SmartSolutionOpener {
                         solutionPath,
                         existingSettings.propertiesFile,
                         existingSettings.version,
-                        existingSettings.configuration
+                        configuration
                     );
 
                     if (success) {

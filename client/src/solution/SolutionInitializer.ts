@@ -2,7 +2,7 @@ import { workspace, window as vscodeWindow, ExtensionContext, Disposable, comman
 import { LanguageClient } from 'vscode-languageclient/node';
 import { globalSolutionFile, globalClarionPropertiesFile, globalClarionVersion, globalSettings, setGlobalClarionSelection, getClarionConfigTarget } from '../globals';
 import { SolutionCache } from '../SolutionCache';
-import { extractConfigurationsFromSolution } from '../utils/ExtensionHelpers';
+import { resolveValidConfiguration } from '../utils/ConfigurationValidator';
 import {
     completeInitializationStatusBar,
     failInitializationStatusBar,
@@ -238,63 +238,22 @@ export async function initializeSolution(
         return;
     }
 
-    // ✅ Get configurations from the solution file
-    const solutionFileContent = fs.readFileSync(globalSolutionFile, 'utf-8');
-    const availableConfigs = extractConfigurationsFromSolution(solutionFileContent);
-
-    // ✅ Step 2: Validate the stored configuration
-    let needsConfigUpdate = !availableConfigs.includes(globalSettings.configuration);
-    
-    // Try to auto-migrate old-style configuration (e.g., "Debug" -> "Debug|Win32")
-    if (needsConfigUpdate && globalSettings.configuration) {
-        const matchingConfig = availableConfigs.find(config => 
-            config.startsWith(globalSettings.configuration + '|')
-        );
-        
-        if (matchingConfig) {
-            logger.info(`🔄 Auto-migrating configuration: ${globalSettings.configuration} -> ${matchingConfig}`);
-            globalSettings.configuration = matchingConfig;
-            needsConfigUpdate = false; // We found a match, update but don't prompt user
-            
-            // Save the migrated configuration
-            await setGlobalClarionSelection(
-                globalSolutionFile,
-                globalClarionPropertiesFile,
-                globalClarionVersion,
-                globalSettings.configuration
-            );
-            updateConfigurationStatusBar(globalSettings.configuration);
-            logger.info(`✅ Auto-migrated to configuration: ${globalSettings.configuration}`);
-        }
-    }
-    
-    // If still invalid after migration attempt, prompt user
-    if (needsConfigUpdate) {
-        logger.warn(`⚠️ Invalid configuration detected: ${globalSettings.configuration}. Asking user to select a valid one.`);
-
-        // ✅ Step 3: Prompt user to select a valid configuration
-        const selectedConfig = await vscodeWindow.showQuickPick(availableConfigs, {
-            placeHolder: "Invalid configuration detected. Select a valid configuration:",
-        });
-
-        if (!selectedConfig) {
-            vscodeWindow.showWarningMessage("No valid configuration selected. Using first available configuration as fallback.");
-            globalSettings.configuration = availableConfigs[0] || "Debug|Win32"; // ⬅️ Safe fallback with platform
-        } else {
-            globalSettings.configuration = selectedConfig;
-        }
-
-        // ✅ Save the new selection using setGlobalClarionSelection to update solutions array
+    // ✅ Step 2: Validate the stored configuration against what the solution declares.
+    // #437 — the validate / auto-migrate / prompt logic now lives in
+    // `resolveValidConfiguration` so that EVERY path which adopts a solution can
+    // run it, not just the ones that happen to route through here. The resolver
+    // does not persist; that stays this function's job, below.
+    const resolved = await resolveValidConfiguration(globalSolutionFile, globalSettings.configuration);
+    if (resolved.changed) {
+        globalSettings.configuration = resolved.configuration;
         await setGlobalClarionSelection(
             globalSolutionFile,
             globalClarionPropertiesFile,
             globalClarionVersion,
             globalSettings.configuration
         );
-        
-        // ✅ Update the status bar
         updateConfigurationStatusBar(globalSettings.configuration);
-        logger.info(`✅ Updated configuration: ${globalSettings.configuration}`);
+        logger.info(`✅ Configuration ${resolved.reason}: ${globalSettings.configuration}`);
     }
     // #297 fix 2: shared between the solutionReady handler (registered inside the client block)
     // and the eager path's completion check further down — must be function-scoped.
