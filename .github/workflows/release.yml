@@ -14,6 +14,10 @@ on:
 
 permissions:
   contents: write
+  # Needed only by "Point the default branch at the next version branch" below.
+  # That step is continue-on-error, so if an org policy withholds this from
+  # GITHUB_TOKEN the release still completes and the log says what to do by hand.
+  administration: write
 
 jobs:
   release:
@@ -124,6 +128,36 @@ jobs:
           git add package.json package-lock.json CHANGELOG.md
           git commit -m "chore: Bump version to ${{ inputs.next_version }} and add changelog stub"
           git push origin version-${{ inputs.next_version }}
+
+      - name: Point the default branch at the next version branch
+        # CONTRIBUTING tells contributors to target the current development branch,
+        # and GitHub pre-selects the repository default as a PR's base. When the
+        # default is left on master, every external PR arrives mis-based: #439 came
+        # in as 70 files / +4930 for what was actually a 3-file / +129 change,
+        # because the diff picked up everything already merged into the version
+        # branch. The contributor had done nothing wrong.
+        #
+        # Doing this here also keeps CONTRIBUTING's "normally also the repository's
+        # default branch" true release after release, instead of relying on someone
+        # remembering. Must run BEFORE the delete below: GitHub will not remove a
+        # branch that is currently the default.
+        #
+        # continue-on-error: changing repository settings needs `administration:
+        # write`, which an org policy can withhold from GITHUB_TOKEN. A release must
+        # not fail over a settings tweak, so on refusal we print the one-line manual
+        # fix instead. Swap in a PAT with repo-admin scope if you want it guaranteed.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT="version-${{ inputs.next_version }}"
+          if gh api -X PATCH "repos/${GITHUB_REPOSITORY}" -f default_branch="$NEXT" --silent; then
+            echo "✅ Default branch set to $NEXT — new PRs will now target it by default."
+          else
+            echo "::warning::Could not set the default branch to $NEXT (GITHUB_TOKEN may lack administration:write)."
+            echo "::warning::Set it by hand: gh repo edit ${GITHUB_REPOSITORY} --default-branch $NEXT"
+            echo "::warning::Until then, external PRs will arrive based on master and need retargeting."
+          fi
 
       - name: Delete released version branch
         # Runs only if every prior step succeeded (merge, release, publish, next-branch).
