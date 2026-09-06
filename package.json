@@ -257,265 +257,322 @@
       {
         "command": "clarion.buildCurrentProject",
         "title": "Build Current Project",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.runWithoutDebugging",
         "title": "Run Without Debugging",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.startDebugging",
         "title": "Start Debugging (Clarion Debugger)",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.setStartupProject",
         "title": "Set as Startup Project",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.clearStartupProject",
         "title": "Clear Startup Project",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.buildSolution",
         "title": "Build Clarion Solution",
+        "category": "Clarion",
         "key": "ctrl+shift+b",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.buildSolutionDirect",
         "title": "Build Solution",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.forceRefreshSolutionCache",
         "title": "Refresh Solution",
+        "category": "Clarion",
         "when": "clarion.solutionOpen",
         "icon": "$(sync)"
       },
       {
         "command": "clarion.newSolution",
         "title": "New Solution",
+        "category": "Clarion",
         "icon": "$(add)"
       },
       {
         "command": "clarion.openSolution",
         "title": "Open Solution",
+        "category": "Clarion",
         "icon": "$(folder-opened)"
       },
       {
         "command": "clarion.openDetectedSolution",
-        "title": "Open Detected Solution"
+        "title": "Open Detected Solution",
+        "category": "Clarion"
       },
       {
         "command": "clarion.openSolutionFromList",
         "title": "Open Solution List",
+        "category": "Clarion",
         "icon": "$(list-selection)"
       },
       {
         "command": "clarion.openSolutionMenu",
         "title": "Open Solution...",
+        "category": "Clarion",
         "icon": "$(folder-opened)"
       },
       {
         "command": "clarion.closeSolution",
         "title": "Close Solution",
+        "category": "Clarion",
         "when": "clarion.solutionOpen",
         "icon": "$(close)"
       },
       {
         "command": "clarion.quickOpen",
-        "title": "Clarion: Quick Open (Includes Redirection Paths)",
+        "title": "Quick Open (Includes Redirection Paths)",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.setConfiguration",
-        "title": "Clarion: Set Configuration",
+        "title": "Set Configuration",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.buildProject",
-        "title": "Build Project"
+        "title": "Build Project",
+        "category": "Clarion"
       },
       {
         "command": "clarion.reinitializeSolution",
-        "title": "Clarion: Reinitialize Solution",
+        "title": "Reinitialize Solution",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.debugSolutionHistory",
-        "title": "Clarion: Debug Solution History"
+        "title": "Debug Solution History",
+        "category": "Clarion"
       },
       {
         "command": "clarion.showExtensionStatus",
-        "title": "Clarion: Show Extension Status"
+        "title": "Show Extension Status",
+        "category": "Clarion"
       },
       {
         "command": "clarion.navigateToProject",
         "title": "Navigate to Project",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.addSourceFile",
         "title": "Add Source File",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.addMapModule",
         "title": "Add MODULE with PROCEDURE",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.addProcedureToModule",
         "title": "Add PROCEDURE to MODULE",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.addProcedureFromMap",
         "title": "Add PROCEDURE",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.removeSourceFile",
         "title": "Remove Source File",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.debug.showFileRelationshipGraph",
-        "title": "Clarion: Show File Relationship Graph (Debug)",
+        "title": "Show File Relationship Graph (Debug)",
+        "category": "Clarion",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.debug.showServerVersion",
-        "title": "Clarion: Show Server Version (Debug)"
+        "title": "Show Server Version (Debug)",
+        "category": "Clarion"
       },
       {
         "command": "clarion.structureView.expandAll",
         "title": "Expand All",
+        "category": "Clarion",
         "icon": "$(expand-all)"
       },
       {
         "command": "clarion.structureView.filter",
         "title": "Filter Structure View",
+        "category": "Clarion",
         "icon": "$(filter)"
       },
       {
         "command": "clarion.structureView.clearFilter",
         "title": "Clear Structure Filter",
+        "category": "Clarion",
         "icon": "$(clear-all)"
       },
       {
         "command": "clarion.structureView.enableFollowCursor",
-        "title": "Enable Follow Cursor"
+        "title": "Enable Follow Cursor",
+        "category": "Clarion"
       },
       {
         "command": "clarion.structureView.disableFollowCursor",
-        "title": "Disable Follow Cursor"
+        "title": "Disable Follow Cursor",
+        "category": "Clarion"
       },
       {
         "command": "clarion.solutionView.filter",
         "title": "Filter Solution Tree",
+        "category": "Clarion",
         "icon": "$(filter)",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.solutionView.clearFilter",
         "title": "Clear Filter",
+        "category": "Clarion",
         "icon": "$(clear-all)",
         "when": "clarion.solutionOpen"
       },
       {
         "command": "clarion.generateAllApps",
-        "title": "Generate All Applications"
+        "title": "Generate All Applications",
+        "category": "Clarion"
       },
       {
         "command": "clarion.generateAllAppsThenBuildSolution",
-        "title": "Generate All/Build All"
+        "title": "Generate All/Build All",
+        "category": "Clarion"
       },
       {
         "command": "clarion.buildAllProjects",
-        "title": "Build All"
+        "title": "Build All",
+        "category": "Clarion"
       },
       {
         "command": "clarion.generateApp",
-        "title": "Generate Application"
+        "title": "Generate Application",
+        "category": "Clarion"
       },
       {
         "command": "clarion.buildProjectFromApp",
-        "title": "Build Project"
+        "title": "Build Project",
+        "category": "Clarion"
       },
       {
         "command": "clarion.generateAndBuildApp",
-        "title": "Generate + Build Project"
+        "title": "Generate + Build Project",
+        "category": "Clarion"
       },
       {
         "command": "clarion.copyFilePath",
-        "title": "Copy File Path"
+        "title": "Copy File Path",
+        "category": "Clarion"
       },
       {
         "command": "clarion.copyRelativePath",
-        "title": "Copy Relative Path"
+        "title": "Copy Relative Path",
+        "category": "Clarion"
       },
       {
         "command": "clarion.openContainingFolder",
-        "title": "Open Containing Folder"
+        "title": "Open Containing Folder",
+        "category": "Clarion"
       },
       {
         "command": "clarion.openInClarionIDE",
         "title": "Open in Clarion IDE",
+        "category": "Clarion",
         "icon": "images/sv57x57.png"
       },
       {
         "command": "clarion.importAppFromTextForSolution",
-        "title": "Import App from Version Control"
+        "title": "Import App from Version Control",
+        "category": "Clarion"
       },
       {
         "command": "clarion.exportAppToVersionControl",
-        "title": "Export App to Version Control"
+        "title": "Export App to Version Control",
+        "category": "Clarion"
       },
       {
         "command": "clarion.importAllAppsFromTextForSolution",
-        "title": "Import All Apps from Version Control"
+        "title": "Import All Apps from Version Control",
+        "category": "Clarion"
       },
       {
         "command": "clarion.exportAllAppsToVersionControl",
-        "title": "Export All Apps to Version Control"
+        "title": "Export All Apps to Version Control",
+        "category": "Clarion"
       },
       {
         "command": "clarion.toggleApplicationSortOrder",
         "title": "Toggle Application Sort Order",
+        "category": "Clarion",
         "icon": "$(arrow-swap)"
       },
       {
         "command": "clarion.pasteAsString",
-        "title": "Clarion: Paste as String"
+        "title": "Paste as String",
+        "category": "Clarion"
       },
       {
         "command": "clarion.surroundWith",
-        "title": "Clarion: Surround With…"
+        "title": "Surround With…",
+        "category": "Clarion"
       },
       {
         "command": "clarion.negateCondition",
-        "title": "Clarion: Negate Condition"
+        "title": "Negate Condition",
+        "category": "Clarion"
       },
       {
         "command": "clarion.flipIfElse",
-        "title": "Clarion: Flip IF/ELSE"
+        "title": "Flip IF/ELSE",
+        "category": "Clarion"
       },
       {
         "command": "clarion.createClass",
-        "title": "Clarion: Create New Class"
+        "title": "Create New Class",
+        "category": "Clarion"
       },
       {
         "command": "clarion.addImplementation",
-        "title": "Clarion: Add Method Implementation"
+        "title": "Add Method Implementation",
+        "category": "Clarion"
       },
       {
         "command": "clarion.setActiveVersion",
-        "title": "Clarion: Set Active Version"
+        "title": "Set Active Version",
+        "category": "Clarion"
       }
     ],
     "menus": {
