@@ -1997,9 +1997,14 @@ export class DocumentStructure {
         let isMethodImpl = false;
         let fullProcedureName = prevToken?.value ?? "AnonymousProcedure";
         
-        // Check if prevToken is a label, variable, attribute, or structure field that might be part of a method name
+        // Check if prevToken is a label, variable, attribute, or structure field that might be part of a method name.
+        // StructurePrefix counts too: a method name carrying a SINGLE colon (e.g. `Free:qLegend` in
+        // `GraphLegendClass.Free:qLegend PROCEDURE`) is captured whole by StructurePrefix's
+        // `Prefix:Field` pattern, so it arrives here as the prevToken. Without it such a line never
+        // enters this block at all and falls through to GlobalProcedure named just the colon segment.
         if (prevToken?.type === TokenType.Label || prevToken?.type === TokenType.Variable ||
-            prevToken?.type === TokenType.Attribute || prevToken?.type === TokenType.StructureField) {
+            prevToken?.type === TokenType.Attribute || prevToken?.type === TokenType.StructureField ||
+            prevToken?.type === TokenType.StructurePrefix) {
             // Check if the previous token contains dots (entire qualified name in one token)
             if (prevToken.value.includes(".")) {
                 // The previous token itself contains dots (e.g., "IConnection.CloseSocket" for 3-part)

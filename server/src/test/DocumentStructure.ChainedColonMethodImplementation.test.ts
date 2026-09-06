@@ -71,6 +71,38 @@ const CHAINED_COLON_METHOD = [
     ''
 ].join('\n');
 
+// The SINGLE-colon variant, which fails by a different mechanism. With one colon the whole
+// trailing name is captured by StructurePrefix's own `Prefix:Field` pattern, so it arrives as
+// the prevToken — and the outer guard admitted only Label/Variable/Attribute/StructureField,
+// so the line never entered the name-reconstruction block at all.
+//
+// Real shape, from Clarion's own shipped LibSrc/win/svgraph.clw (8 occurrences there):
+//   GraphLegendClass.Free:qLegend      procedure
+//
+//  0 PROGRAM
+//  1   MAP
+//  2   END
+//  4 GraphLegendClass CLASS
+//  5 Free:qLegend PROCEDURE
+//  6       END
+//  8 GraphLegendClass.Free:qLegend      procedure
+//  9   CODE
+// 10   RETURN
+const SINGLE_COLON_METHOD = [
+    'PROGRAM',
+    '  MAP',
+    '  END',
+    '',
+    'GraphLegendClass CLASS',
+    'Free:qLegend PROCEDURE',
+    '      END',
+    '',
+    'GraphLegendClass.Free:qLegend      procedure',
+    '  CODE',
+    '  RETURN',
+    ''
+].join('\n');
+
 suite('DocumentStructure — chained colon-qualified method implementation name', () => {
     test('the implementation line is tagged MethodImplementation with the full qualified label', () => {
         const tokens = build(CHAINED_COLON_METHOD);
@@ -93,5 +125,36 @@ suite('DocumentStructure — chained colon-qualified method implementation name'
         const declaringProc = tokens.find(t => t.subType === TokenType.GlobalProcedure && t.label === 'Caller');
         assert.ok(declaringProc, 'expected the declaring procedure token');
         assert.strictEqual(implToken!.declaringProcedureLine, declaringProc!.line);
+    });
+
+    test('a SINGLE-colon method name (whole name captured as StructurePrefix) is also a method implementation', () => {
+        const tokens = build(SINGLE_COLON_METHOD);
+
+        const implToken = tokens.find(t => t.line === 8 && t.type === TokenType.Procedure);
+        assert.ok(implToken, 'expected a Procedure token on the implementation line');
+        assert.strictEqual(implToken!.subType, TokenType.MethodImplementation,
+            `expected MethodImplementation, got ${implToken!.subType === TokenType.GlobalProcedure ? 'GlobalProcedure' : implToken!.subType}`);
+        assert.strictEqual(implToken!.label, 'GraphLegendClass.Free:qLegend');
+    });
+
+    test('a standalone global procedure whose own name carries colons stays a global procedure', () => {
+        // Guards the outer-guard widening: at column 0 the whole colon-bearing name is a Label
+        // (Label's pattern allows colons), so there is no class prefix to collect and nothing
+        // should promote this to a method implementation.
+        const tokens = build([
+            'PROGRAM',
+            '  MAP',
+            '  END',
+            '',
+            'My:Global:Proc PROCEDURE()',
+            '  CODE',
+            '  RETURN',
+            ''
+        ].join('\n'));
+
+        const procToken = tokens.find(t => t.line === 4 && t.type === TokenType.Procedure);
+        assert.ok(procToken, 'expected a Procedure token');
+        assert.strictEqual(procToken!.subType, TokenType.GlobalProcedure,
+            'a colon-bearing standalone procedure name must NOT be read as a class method');
     });
 });
