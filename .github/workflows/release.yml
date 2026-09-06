@@ -14,10 +14,6 @@ on:
 
 permissions:
   contents: write
-  # Needed only by "Point the default branch at the next version branch" below.
-  # That step is continue-on-error, so if an org policy withholds this from
-  # GITHUB_TOKEN the release still completes and the log says what to do by hand.
-  administration: write
 
 jobs:
   release:
@@ -137,26 +133,36 @@ jobs:
         # because the diff picked up everything already merged into the version
         # branch. The contributor had done nothing wrong.
         #
-        # Doing this here also keeps CONTRIBUTING's "normally also the repository's
-        # default branch" true release after release, instead of relying on someone
-        # remembering. Must run BEFORE the delete below: GitHub will not remove a
-        # branch that is currently the default.
+        # Must run BEFORE the delete below: GitHub will not remove a branch that is
+        # currently the default.
         #
-        # continue-on-error: changing repository settings needs `administration:
-        # write`, which an org policy can withhold from GITHUB_TOKEN. A release must
-        # not fail over a settings tweak, so on refusal we print the one-line manual
-        # fix instead. Swap in a PAT with repo-admin scope if you want it guaranteed.
+        # GITHUB_TOKEN CANNOT do this. Changing the default branch is a repository
+        # settings write, and `administration` is a fine-grained-PAT permission, not
+        # one of the `permissions:` keys a workflow token accepts — declaring it
+        # makes the whole workflow file invalid. So this step uses an OPTIONAL PAT
+        # secret and degrades to a reminder when it is absent, which is the state
+        # today (only VSCE_PAT is configured).
+        #
+        # To automate it: create a PAT with repo-admin rights and add it as
+        # REPO_ADMIN_TOKEN. Until then the release still completes and the log
+        # carries the one-line manual fix.
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
         run: |
           NEXT="version-${{ inputs.next_version }}"
+          MANUAL="gh repo edit ${GITHUB_REPOSITORY} --default-branch $NEXT"
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::No REPO_ADMIN_TOKEN secret — cannot set the default branch automatically."
+            echo "::warning::Run this now: $MANUAL"
+            echo "::warning::Until it is set, external PRs arrive based on master and need retargeting (see #439)."
+            exit 0
+          fi
           if gh api -X PATCH "repos/${GITHUB_REPOSITORY}" -f default_branch="$NEXT" --silent; then
             echo "✅ Default branch set to $NEXT — new PRs will now target it by default."
           else
-            echo "::warning::Could not set the default branch to $NEXT (GITHUB_TOKEN may lack administration:write)."
-            echo "::warning::Set it by hand: gh repo edit ${GITHUB_REPOSITORY} --default-branch $NEXT"
-            echo "::warning::Until then, external PRs will arrive based on master and need retargeting."
+            echo "::warning::REPO_ADMIN_TOKEN did not have rights to set the default branch."
+            echo "::warning::Run this by hand: $MANUAL"
           fi
 
       - name: Delete released version branch
