@@ -221,9 +221,20 @@ export class MethodHoverResolver {
         
         // Count parameters in the declaration
         const paramCount = this.overloadResolver.countParametersInDeclaration(line);
-        
+
+        // Issue #233 (Rule 4) fast path: a procedure-local CLASS's method implementation
+        // is bound to its declaring procedure via `declaringProcedureLine` (stamped by
+        // DocumentStructure.linkLocalDerivedMethodsPass()). The name-only search below
+        // (findMethodImplementationCrossFile → searchFileForImplementation) matches
+        // purely on ClassName.MethodName text and can't tell apart the same local class
+        // name reused in a different procedure elsewhere in the file — this link already
+        // resolved that ambiguity deterministically at index time, so prefer it.
+        const localImplLocation = this.findLocalDerivedMethodImplementation(
+            methodTokens, classToken, className, currentToken.label, document
+        );
+
         // Search for implementation using cross-file lookup
-        const implLocation = await this.findMethodImplementationCrossFile(
+        const implLocation = localImplLocation ?? await this.findMethodImplementationCrossFile(
             className,
             currentToken.label,
             document,
@@ -461,6 +472,57 @@ export class MethodHoverResolver {
         }
 
         return this.formatter.formatClassMember(fieldName, chainedInfo);
+    }
+
+    /**
+     * Issue #233 (Rule 4): if `classToken` is a procedure-local CLASS, find the
+     * `Class.Method` implementation token bound to that SAME declaring procedure
+     * (via `declaringProcedureLine`) and return it as a `uri:line` location string.
+     * Returns null for module/global-scope classes (no enclosing procedure) or when
+     * no implementation has been linked to this exact declaring procedure yet.
+     */
+    private findLocalDerivedMethodImplementation(
+        tokens: Token[],
+        classToken: Token,
+        className: string,
+        methodName: string,
+        document: TextDocument
+    ): string | null {
+        const owningProcedure = this.findEnclosingProcedureToken(tokens, classToken.line);
+        if (!owningProcedure) return null;
+
+        const qualifiedName = `${className}.${methodName}`.toUpperCase();
+        const implToken = tokens.find(t =>
+            t.subType === TokenType.MethodImplementation &&
+            t.declaringProcedureLine === owningProcedure.line &&
+            t.label?.toUpperCase() === qualifiedName
+        );
+        if (!implToken) return null;
+
+        logger.info(`✅ [Rule 4] Found local derived method implementation for ${qualifiedName} bound to declaring procedure at line ${owningProcedure.line}`);
+        return `${document.uri}:${implToken.line}`;
+    }
+
+    /**
+     * Find the GlobalProcedure token whose body encloses `line` (nesting-aware,
+     * via `finishesAt` — same pattern as findClassTokenForMethodDeclaration).
+     */
+    private findEnclosingProcedureToken(tokens: Token[], line: number): Token | null {
+        for (let i = tokens.length - 1; i >= 0; i--) {
+            const token = tokens[i];
+
+            if (token.line > line) {
+                continue;
+            }
+
+            if (token.subType === TokenType.GlobalProcedure) {
+                if (token.finishesAt === undefined || line <= token.finishesAt) {
+                    return token;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
