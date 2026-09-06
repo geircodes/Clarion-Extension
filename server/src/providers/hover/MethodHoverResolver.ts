@@ -222,25 +222,37 @@ export class MethodHoverResolver {
         // Count parameters in the declaration
         const paramCount = this.overloadResolver.countParametersInDeclaration(line);
 
-        // Issue #233 (Rule 4) fast path: a procedure-local CLASS's method implementation
-        // is bound to its declaring procedure via `declaringProcedureLine` (stamped by
-        // DocumentStructure.linkLocalDerivedMethodsPass()). The name-only search below
-        // (findMethodImplementationCrossFile → searchFileForImplementation) matches
-        // purely on ClassName.MethodName text and can't tell apart the same local class
-        // name reused in a different procedure elsewhere in the file — this link already
-        // resolved that ambiguity deterministically at index time, so prefer it.
-        const localImplLocation = this.findLocalDerivedMethodImplementation(
-            methodTokens, classToken, className, currentToken.label, document
-        );
+        // Issue #233 (Rule 4): for a procedure-local CLASS, the language itself fixes where
+        // the implementation lives — immediately after the declaring procedure, before the
+        // next PROCEDURE — and DocumentStructure.linkLocalDerivedMethodsPass() has already
+        // bound it via `declaringProcedureLine`. So for such a class that link is not a
+        // "fast path", it is the ONLY correct answer: a miss means the implementation is
+        // genuinely absent, and falling back to the name-only search below would then match
+        // an unrelated same-named implementation in a different procedure (or, via the
+        // solution sweep, a different file entirely) — the exact ambiguity this link exists
+        // to resolve.
+        //
+        // `localClassTokens` (set by that same pass, on GlobalProcedure tokens only) is both
+        // the test for "is this a local class" and the declaring procedure itself — so ask
+        // the pass rather than re-deriving the ownership here. An unregistered class keeps
+        // the generic search unchanged.
+        const owningProcedure = methodTokens.find(t => t.localClassTokens?.includes(classToken));
 
-        // Search for implementation using cross-file lookup
-        const implLocation = localImplLocation ?? await this.findMethodImplementationCrossFile(
-            className,
-            currentToken.label,
-            document,
-            paramCount,
-            moduleFile
-        );
+        let implLocation: string | null;
+        if (owningProcedure) {
+            implLocation = this.findLocalDerivedMethodImplementation(
+                methodTokens, owningProcedure, className, currentToken.label, document, paramCount
+            );
+        } else {
+            // Search for implementation using cross-file lookup
+            implLocation = await this.findMethodImplementationCrossFile(
+                className,
+                currentToken.label,
+                document,
+                paramCount,
+                moduleFile
+            );
+        }
         
         if (implLocation) {
             logger.info(`✅ Found implementation at ${implLocation}`);
@@ -475,54 +487,41 @@ export class MethodHoverResolver {
     }
 
     /**
-     * Issue #233 (Rule 4): if `classToken` is a procedure-local CLASS, find the
-     * `Class.Method` implementation token bound to that SAME declaring procedure
-     * (via `declaringProcedureLine`) and return it as a `uri:line` location string.
-     * Returns null for module/global-scope classes (no enclosing procedure) or when
-     * no implementation has been linked to this exact declaring procedure yet.
+     * Issue #233 (Rule 4): the `Class.Method` implementation token bound to `owningProcedure`
+     * via `declaringProcedureLine`, as a `uri:line` location string. Null means the
+     * implementation is genuinely absent — the caller must NOT fall back to a name-based
+     * search, which cannot tell this class apart from a same-named local class in another
+     * procedure.
+     *
+     * `owningProcedure` comes from the class's own `localClassTokens` registration.
      */
     private findLocalDerivedMethodImplementation(
         tokens: Token[],
-        classToken: Token,
+        owningProcedure: Token,
         className: string,
         methodName: string,
-        document: TextDocument
+        document: TextDocument,
+        paramCount?: number
     ): string | null {
-        const owningProcedure = this.findEnclosingProcedureToken(tokens, classToken.line);
-        if (!owningProcedure) return null;
-
         const qualifiedName = `${className}.${methodName}`.toUpperCase();
-        const implToken = tokens.find(t =>
+        const candidates = tokens.filter(t =>
             t.subType === TokenType.MethodImplementation &&
             t.declaringProcedureLine === owningProcedure.line &&
             t.label?.toUpperCase() === qualifiedName
         );
-        if (!implToken) return null;
+        if (candidates.length === 0) {
+            logger.info(`[Rule 4] No implementation bound to declaring procedure at line ${owningProcedure.line} for ${qualifiedName}`);
+            return null;
+        }
+
+        // Overloads all bind to the same declaring procedure under the same qualified name —
+        // pick by arity, using the tokenizer's own parsed parameter list.
+        const implToken = (paramCount !== undefined
+            ? candidates.find(t => t.parameters?.length === paramCount)
+            : undefined) ?? candidates[0];
 
         logger.info(`✅ [Rule 4] Found local derived method implementation for ${qualifiedName} bound to declaring procedure at line ${owningProcedure.line}`);
         return `${document.uri}:${implToken.line}`;
-    }
-
-    /**
-     * Find the GlobalProcedure token whose body encloses `line` (nesting-aware,
-     * via `finishesAt` — same pattern as findClassTokenForMethodDeclaration).
-     */
-    private findEnclosingProcedureToken(tokens: Token[], line: number): Token | null {
-        for (let i = tokens.length - 1; i >= 0; i--) {
-            const token = tokens[i];
-
-            if (token.line > line) {
-                continue;
-            }
-
-            if (token.subType === TokenType.GlobalProcedure) {
-                if (token.finishesAt === undefined || line <= token.finishesAt) {
-                    return token;
-                }
-            }
-        }
-
-        return null;
     }
 
     /**
